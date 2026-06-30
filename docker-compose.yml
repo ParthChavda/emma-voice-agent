@@ -1,0 +1,7 @@
+# Phase 5: optional containerized run.
+# services:
+#   app:
+#     build: .
+#     ports:
+#       - "8000:8000"
+#     env_file: .env
