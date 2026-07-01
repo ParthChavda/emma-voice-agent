@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .env
 .pytest_cache/
+output.mp3
+voice_loop_reply.mp3
