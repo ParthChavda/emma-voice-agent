@@ -11,6 +11,7 @@ _DEFAULT_MODEL = "aura-2-thalia-en"
 async def synthesize_speech(text: str, model: str = _DEFAULT_MODEL) -> bytes:
     headers = {
         "Authorization": f"Token {settings.deepgram_api_key}",
+        "Content-Type": "application/json",
     }
     params = {"model": model, "encoding": "mp3"}
 
