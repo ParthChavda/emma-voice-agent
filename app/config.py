@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     deepgram_api_key: str = ""
     twilio_auth_token: str = ""
+    qdrant_url: str = "http://localhost:6333"
+    postgres_dsn: str = "postgresql://emma:emma@localhost:5432/emma"
 
 
 settings = Settings()
