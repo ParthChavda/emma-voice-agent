@@ -71,3 +71,17 @@ async def test_save_turn_inserts_row():
     assert session_id == "sess-1"
     assert role == "user"
     assert content == "I need an appointment"
+
+
+def test_get_pool_raises_when_not_initialised():
+    with patch("app.db._pool", None):
+        from app.db import get_pool
+        with pytest.raises(RuntimeError):
+            get_pool()
+
+
+def test_get_pool_returns_pool_when_initialised():
+    mock_pool = MagicMock()
+    with patch("app.db._pool", mock_pool):
+        from app.db import get_pool
+        assert get_pool() is mock_pool

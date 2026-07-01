@@ -1,8 +1,10 @@
 import json
+from datetime import datetime
 
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.services import appointments, patients, prescriptions
 
 _client: AsyncOpenAI | None = None
 
@@ -21,6 +23,10 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "patient_name": {"type": "string"},
+                    "patient_dob": {
+                        "type": "string",
+                        "description": "Patient's date of birth, format YYYY-MM-DD",
+                    },
                     "appointment_type": {
                         "type": "string",
                         "enum": ["routine", "urgent", "telephone", "nurse"],
@@ -30,7 +36,7 @@ TOOLS = [
                         "description": "Free-text date/time preference",
                     },
                 },
-                "required": ["patient_name", "appointment_type"],
+                "required": ["patient_name", "patient_dob", "appointment_type"],
             },
         },
     },
@@ -43,9 +49,13 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "patient_name": {"type": "string"},
+                    "patient_dob": {
+                        "type": "string",
+                        "description": "Patient's date of birth, format YYYY-MM-DD",
+                    },
                     "medication_name": {"type": "string"},
                 },
-                "required": ["patient_name", "medication_name"],
+                "required": ["patient_name", "patient_dob", "medication_name"],
             },
         },
     },
@@ -93,21 +103,46 @@ TOOLS = [
 ]
 
 MOCK_RESPONSES: dict = {
-    "book_appointment": lambda args: {
-        "slot": "Tuesday 15 Jul 10:30",
-        "ref": f"APT-{abs(hash(args.get('patient_name', ''))) % 9000 + 1000}",
-    },
-    "repeat_prescription": lambda args: {
-        "status": "requested",
-        "ready_in": "48 hours",
-        "ref": f"RX-{abs(hash(args.get('medication_name', ''))) % 9000 + 1000}",
-    },
     "check_test_results": lambda _: {
         "status": "available",
         "message": "Results are ready. Please call after 2pm.",
     },
     "escalate_urgent": lambda _: {"action": "999_redirect"},
     "escalate_human": lambda _: {"action": "transfer", "queue_position": 2},
+}
+
+
+def _format_slot_time(iso_str: str) -> str:
+    """Render an ISO timestamp as unambiguous natural language for the model to quote verbatim."""
+    return datetime.fromisoformat(iso_str).strftime("%A %d %B %Y at %H:%M")
+
+
+async def _handle_book_appointment(args: dict) -> dict:
+    patient = await patients.find_patient(args["patient_name"], args["patient_dob"])
+    if patient is None:
+        return {"error": "patient_not_found"}
+    slots = await appointments.list_available_slots(args["appointment_type"])
+    if not slots:
+        return {"error": "no_slots_available"}
+    booking = await appointments.create_booking(patient["id"], slots[0]["id"])
+    return {
+        "slot": _format_slot_time(booking["start_time"]),
+        "doctor": booking["doctor_name"],
+        "ref": booking["ref"],
+    }
+
+
+async def _handle_repeat_prescription(args: dict) -> dict:
+    patient = await patients.find_patient(args["patient_name"], args["patient_dob"])
+    if patient is None:
+        return {"error": "patient_not_found"}
+    result = await prescriptions.request_repeat(patient["id"], args["medication_name"])
+    return {"status": "requested", "ready_in": "48 hours", "ref": result["ref"]}
+
+
+ASYNC_HANDLERS = {
+    "book_appointment": _handle_book_appointment,
+    "repeat_prescription": _handle_repeat_prescription,
 }
 
 
@@ -140,10 +175,12 @@ async def chat_completion(
     if fn_name == "escalate_urgent":
         return URGENT_REPLY, fn_name
 
-    if fn_name not in MOCK_RESPONSES:
+    if fn_name in ASYNC_HANDLERS:
+        mock_result = await ASYNC_HANDLERS[fn_name](fn_args)
+    elif fn_name in MOCK_RESPONSES:
+        mock_result = MOCK_RESPONSES[fn_name](fn_args)
+    else:
         return f"I'm sorry, I wasn't able to complete that request. Please call us on 0161 234 5678.", fn_name
-
-    mock_result = MOCK_RESPONSES[fn_name](fn_args)
 
     messages = messages + [
         {
