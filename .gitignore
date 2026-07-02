@@ -5,3 +5,4 @@ __pycache__/
 .pytest_cache/
 output.mp3
 voice_loop_reply.mp3
+call_reply_*.wav

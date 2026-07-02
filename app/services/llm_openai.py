@@ -155,6 +155,9 @@ async def _handle_book_appointment(args: dict) -> dict:
         return {"error": "no_slots_available"}
     booking = await appointments.create_booking(patient["id"], slots[0]["id"])
     return {
+        # The verified record's name, not necessarily what the caller's
+        # speech transcribed to — so Emma confirms the correct name back.
+        "patient_name": patient["full_name"],
         "slot": _format_slot_time(booking["start_time"]),
         "doctor": booking["doctor_name"],
         "ref": booking["ref"],
@@ -166,7 +169,12 @@ async def _handle_repeat_prescription(args: dict) -> dict:
     if patient is None:
         return {"error": "patient_not_found"}
     result = await prescriptions.request_repeat(patient["id"], args["medication_name"])
-    return {"status": "requested", "ready_in": "48 hours", "ref": result["ref"]}
+    return {
+        "patient_name": patient["full_name"],
+        "status": "requested",
+        "ready_in": "48 hours",
+        "ref": result["ref"],
+    }
 
 
 ASYNC_HANDLERS = {

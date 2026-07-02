@@ -161,7 +161,10 @@ async def test_chat_completion_book_appointment_makes_second_call():
 
     with (
         patch("app.services.llm_openai._client", mock_client),
-        patch("app.services.patients.find_patient", AsyncMock(return_value={"id": 1})),
+        patch(
+            "app.services.patients.find_patient",
+            AsyncMock(return_value={"id": 1, "full_name": "Alice Smith"}),
+        ),
         patch(
             "app.services.appointments.list_available_slots",
             AsyncMock(return_value=[
@@ -220,7 +223,10 @@ async def test_handle_book_appointment_returns_booking_on_success():
     from app.services.llm_openai import _handle_book_appointment
 
     with (
-        patch("app.services.patients.find_patient", AsyncMock(return_value={"id": 1})),
+        patch(
+            "app.services.patients.find_patient",
+            AsyncMock(return_value={"id": 1, "full_name": "Alice Smith"}),
+        ),
         patch(
             "app.services.appointments.list_available_slots",
             AsyncMock(return_value=[
@@ -238,10 +244,11 @@ async def test_handle_book_appointment_returns_booking_on_success():
         ),
     ):
         result = await _handle_book_appointment(
-            {"patient_name": "Alice", "patient_dob": "1990-05-20", "appointment_type": "routine"}
+            {"patient_name": "Elias", "patient_dob": "1990-05-20", "appointment_type": "routine"}
         )
 
     assert result == {
+        "patient_name": "Alice Smith",
         "slot": "Monday 06 July 2026 at 09:00",
         "doctor": "Dr. Ahmed",
         "ref": "APT-ABC123",
@@ -265,7 +272,10 @@ async def test_handle_repeat_prescription_returns_requested_status_on_success():
     from app.services.llm_openai import _handle_repeat_prescription
 
     with (
-        patch("app.services.patients.find_patient", AsyncMock(return_value={"id": 1})),
+        patch(
+            "app.services.patients.find_patient",
+            AsyncMock(return_value={"id": 1, "full_name": "Bob Jones"}),
+        ),
         patch(
             "app.services.prescriptions.request_repeat",
             AsyncMock(return_value={"ref": "RX-XYZ999"}),
@@ -275,4 +285,9 @@ async def test_handle_repeat_prescription_returns_requested_status_on_success():
             {"patient_name": "Bob", "patient_dob": "1985-02-14", "medication_name": "metformin"}
         )
 
-    assert result == {"status": "requested", "ready_in": "48 hours", "ref": "RX-XYZ999"}
+    assert result == {
+        "patient_name": "Bob Jones",
+        "status": "requested",
+        "ready_in": "48 hours",
+        "ref": "RX-XYZ999",
+    }

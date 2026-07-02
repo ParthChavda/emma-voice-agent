@@ -167,26 +167,24 @@ class CallSession:
         # Still paced to real time (one frame per FRAME_DURATION_S) regardless
         # of how fast Deepgram delivers — sending faster than real time is what
         # causes choppy/broken playback on Twilio's end.
+        async def _send(frame: bytes) -> None:
+            await self.websocket.send_json({
+                "event": "media",
+                "streamSid": self.stream_sid,
+                "media": {"payload": base64.b64encode(frame).decode("ascii")},
+            })
+            await anyio.sleep(FRAME_DURATION_S)
+
         buffer = bytearray()
         async for chunk in synthesize_speech_stream(text, encoding="mulaw", sample_rate=8000, container="none"):
             buffer.extend(chunk)
             while len(buffer) >= FRAME_BYTES:
                 frame = bytes(buffer[:FRAME_BYTES])
                 del buffer[:FRAME_BYTES]
-                await self.websocket.send_json({
-                    "event": "media",
-                    "streamSid": self.stream_sid,
-                    "media": {"payload": base64.b64encode(frame).decode("ascii")},
-                })
-                await anyio.sleep(FRAME_DURATION_S)
+                await _send(frame)
 
         if buffer:
-            await self.websocket.send_json({
-                "event": "media",
-                "streamSid": self.stream_sid,
-                "media": {"payload": base64.b64encode(bytes(buffer)).decode("ascii")},
-            })
-            await anyio.sleep(FRAME_DURATION_S)
+            await _send(bytes(buffer))
 
         if not wait_for_playback:
             return
