@@ -1,4 +1,7 @@
 import json
+import re
+import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from openai import AsyncOpenAI
@@ -252,3 +255,174 @@ async def chat_completion(
         tool_choice="none",
     )
     return response2.choices[0].message.content, fn_name
+
+
+# Requires whitespace already present after the punctuation — deliberately
+# does NOT match end-of-buffer, since mid-stream that just means "more
+# characters may still be coming" (e.g. "3." before a "5" arrives).
+_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?]+\s+")
+
+
+def _extract_ready_sentences(buffer: str) -> tuple[list[str], str]:
+    """Split complete sentences off the front of buffer. Returns (sentences, remainder)."""
+    sentences = []
+    while True:
+        match = _SENTENCE_BOUNDARY_RE.search(buffer)
+        if not match:
+            break
+        sentence = buffer[: match.end()].strip()
+        if sentence:
+            sentences.append(sentence)
+        buffer = buffer[match.end() :]
+    return sentences, buffer
+
+
+async def _stream_text_by_sentence(stream, on_sentence: Callable[[str], Awaitable[None]]) -> str:
+    buffer = ""
+    parts: list[str] = []
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+        if delta.content:
+            buffer += delta.content
+            ready, buffer = _extract_ready_sentences(buffer)
+            for sentence in ready:
+                parts.append(sentence)
+                await on_sentence(sentence)
+    remaining = buffer.strip()
+    if remaining:
+        parts.append(remaining)
+        await on_sentence(remaining)
+    return " ".join(parts)
+
+
+async def _stream_first_completion(
+    messages: list[dict],
+    tools: list[dict],
+    on_sentence: Callable[[str], Awaitable[None]],
+):
+    """Streams the tool_choice="auto" completion. If the model replies with
+    plain text, streams it sentence-by-sentence via on_sentence and returns
+    (full_text, None, None, None). If it calls a tool instead, returns
+    (None, fn_name, fn_args, tool_call_id) without calling on_sentence — tool
+    calls don't produce user-facing text on this first round."""
+    stream = await get_client().chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages,
+        tools=tools,
+        tool_choice="auto",
+        stream=True,
+    )
+
+    buffer = ""
+    parts: list[str] = []
+    tool_call_id: str | None = None
+    tool_call_name: str | None = None
+    tool_call_args = ""
+    saw_tool_call = False
+
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+        if delta.tool_calls:
+            saw_tool_call = True
+            for tc_delta in delta.tool_calls:
+                if tc_delta.id:
+                    tool_call_id = tc_delta.id
+                if tc_delta.function and tc_delta.function.name:
+                    tool_call_name = tc_delta.function.name
+                if tc_delta.function and tc_delta.function.arguments:
+                    tool_call_args += tc_delta.function.arguments
+        elif delta.content:
+            buffer += delta.content
+            ready, buffer = _extract_ready_sentences(buffer)
+            for sentence in ready:
+                parts.append(sentence)
+                await on_sentence(sentence)
+
+    if saw_tool_call:
+        return None, tool_call_name, json.loads(tool_call_args or "{}"), tool_call_id
+
+    remaining = buffer.strip()
+    if remaining:
+        parts.append(remaining)
+        await on_sentence(remaining)
+    return " ".join(parts), None, None, None
+
+
+async def chat_completion_stream(
+    messages: list[dict],
+    tools: list[dict],
+    on_sentence: Callable[[str], Awaitable[None]],
+) -> tuple[str, str | None]:
+    """Like chat_completion(), but calls on_sentence(text) for each complete
+    sentence of the reply as soon as it's available, instead of only
+    returning the full reply once generation has finished. Lets the caller
+    (the live call handler) start speaking a reply before the model has
+    finished composing the rest of it.
+    """
+    if _mentions_urgent_symptom(messages):
+        await on_sentence(URGENT_REPLY)
+        return URGENT_REPLY, "escalate_urgent"
+
+    # Marks when the (first) completion call begins; wrapping on_sentence lets
+    # us log time-to-first-sentence without the caller needing to know
+    # whether that sentence comes from this completion or, for tool-call
+    # turns, the second one below.
+    llm_start = time.perf_counter()
+    first_sentence_logged = False
+
+    async def timed_on_sentence(sentence: str) -> None:
+        nonlocal first_sentence_logged
+        if not first_sentence_logged:
+            first_sentence_logged = True
+            elapsed = time.perf_counter() - llm_start
+            print(f'[EMMA-TIMING] LLM first sentence: {elapsed:.2f}s | text: "{sentence}"')
+        await on_sentence(sentence)
+
+    reply, fn_name, fn_args, tool_call_id = await _stream_first_completion(messages, tools, timed_on_sentence)
+
+    if reply is not None:
+        return reply, None
+
+    if fn_name == "escalate_urgent":
+        await timed_on_sentence(URGENT_REPLY)
+        return URGENT_REPLY, fn_name
+
+    if fn_name in ASYNC_HANDLERS:
+        mock_result = await ASYNC_HANDLERS[fn_name](fn_args)
+    elif fn_name in MOCK_RESPONSES:
+        mock_result = MOCK_RESPONSES[fn_name](fn_args)
+    else:
+        reply = "I'm sorry, I wasn't able to complete that request. Please call us on 0161 234 5678."
+        await timed_on_sentence(reply)
+        return reply, fn_name
+
+    messages = messages + [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": fn_name,
+                        "arguments": json.dumps(fn_args),
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": json.dumps(mock_result),
+        },
+    ]
+    stream2 = await get_client().chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages,
+        tools=tools,
+        tool_choice="none",
+        stream=True,
+    )
+    full_reply = await _stream_text_by_sentence(stream2, timed_on_sentence)
+    return full_reply, fn_name

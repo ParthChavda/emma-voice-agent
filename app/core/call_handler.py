@@ -1,6 +1,7 @@
 import base64
 import math
 import time
+from collections.abc import Awaitable, Callable
 
 import anyio
 import httpx
@@ -9,7 +10,7 @@ from app import db
 from app.config import settings
 from app.core.notes import generate_call_summary
 from app.core.prompts import build_messages
-from app.services.llm_openai import TOOLS, chat_completion
+from app.services.llm_openai import TOOLS, chat_completion_stream
 from app.services.rag import retrieve
 from app.services.stt_deepgram import transcribe_stream
 from app.services.tts_deepgram import synthesize_speech_stream
@@ -17,6 +18,10 @@ from app.services.tts_deepgram import synthesize_speech_stream
 FRAME_BYTES = 160  # 20ms of 8kHz 8-bit mulaw, Twilio's expected media frame size
 FRAME_DURATION_S = 0.02
 MARK_TIMEOUT_S = 10
+# Below this word count, skip RAG entirely — short turns ("yes", "book it",
+# "cancel") are confirmations/commands, not the kind of question RAG context
+# would help answer, and the Qdrant+embedding round trip isn't free.
+SHORT_TURN_WORD_THRESHOLD = 6
 
 GREETING = (
     "Hello, thank you for calling Elmwood Road Surgery. "
@@ -57,6 +62,10 @@ class CallSession:
         self._audio_send, self._audio_receive = anyio.create_memory_object_stream(max_buffer_size=math.inf)
         self._turn_lock = anyio.Lock()
         self._task_group: anyio.abc.TaskGroup | None = None
+        # Reset to None at the end of each turn (see _process_turn's finally);
+        # set on the next Twilio audio frame that arrives, marking t=0 for
+        # that turn's [EMMA-TIMING] logs.
+        self._turn_timer_start: float | None = None
 
     async def run(self) -> None:
         try:
@@ -93,6 +102,8 @@ class CallSession:
                     self._task_group.start_soon(self._speak_greeting)
 
                 elif event == "media":
+                    if self._turn_timer_start is None:
+                        self._turn_timer_start = time.perf_counter()
                     payload = base64.b64decode(message["media"]["payload"])
                     await self._audio_send.send(payload)
 
@@ -121,7 +132,7 @@ class CallSession:
             self.history.append({"role": "assistant", "content": GREETING})
             if self.call_sid:
                 await db.save_turn(self.call_sid, "assistant", GREETING)
-            await self._speak(GREETING, wait_for_playback=False)
+            await self._speak(GREETING)
 
     async def _on_final(self, text: str) -> None:
         self.turn_parts.append(text)
@@ -131,6 +142,9 @@ class CallSession:
             return
         user_message = " ".join(self.turn_parts)
         self.turn_parts = []
+        if self._turn_timer_start is not None:
+            elapsed = time.perf_counter() - self._turn_timer_start
+            print(f'[EMMA-TIMING] STT final transcript: {elapsed:.2f}s | text: "{user_message}"')
         # Spawn rather than await: the STT receive loop must keep pulling
         # audio into Deepgram while this turn is processed, or Deepgram closes
         # the connection for inactivity if a turn takes more than a few seconds.
@@ -141,38 +155,93 @@ class CallSession:
             await self._process_turn(user_message)
 
     async def _process_turn(self, user_message: str) -> None:
-        chunks = await retrieve(user_message, top_k=3)
-        messages = build_messages(chunks, self.history, user_message)
-        reply, intent = await chat_completion(messages, TOOLS)
+        # Falls back to now() if somehow unset (e.g. tests that skip the
+        # media-event path) so the TOTAL log below never explodes/goes negative.
+        turn_start = self._turn_timer_start or time.perf_counter()
+        try:
+            # Short turns ("yes", "book it", "cancel") are confirmations/commands,
+            # not questions RAG context would help answer — skip the Qdrant round
+            # trip entirely rather than pay for a lookup the model won't use.
+            if len(user_message.split()) < SHORT_TURN_WORD_THRESHOLD:
+                chunks: list[str] = []
+            else:
+                rag_start = time.perf_counter()
+                chunks = await retrieve(user_message, top_k=3)
+                print(f"[EMMA-TIMING] RAG retrieve: {time.perf_counter() - rag_start:.2f}s")
+            messages = build_messages(chunks, self.history, user_message)
 
-        self.history.append({"role": "user", "content": user_message})
-        self.history.append({"role": "assistant", "content": reply})
-        if self.call_sid:
-            await db.save_turn(self.call_sid, "user", user_message)
-            await db.save_turn(self.call_sid, "assistant", reply)
+            # Speaks each sentence as soon as it's generated rather than waiting
+            # for the whole reply — the caller hears the first sentence while the
+            # model is still composing the rest of it.
+            is_first_sentence = True
 
-        if intent == "escalate_urgent":
-            await self._speak(reply, wait_for_playback=True)
-            await self._end_call()
-        elif intent == "escalate_human":
-            await self._speak(reply, wait_for_playback=True)
-            await self._transfer_to_human()
-        else:
-            await self._speak(reply, wait_for_playback=False)
+            async def on_sentence(sentence: str) -> None:
+                nonlocal is_first_sentence
+                if is_first_sentence:
+                    is_first_sentence = False
+                    tts_start = time.perf_counter()
 
-    async def _speak(self, text: str, wait_for_playback: bool) -> None:
+                    async def _on_first_frame() -> None:
+                        print(f"[EMMA-TIMING] TTS first audio sent: {time.perf_counter() - tts_start:.2f}s")
+                        print(f"[EMMA-TIMING] TOTAL turn latency: {time.perf_counter() - turn_start:.2f}s")
+
+                    await self._speak(sentence, on_first_frame=_on_first_frame)
+                else:
+                    await self._speak(sentence)
+
+            reply, intent = await chat_completion_stream(messages, TOOLS, on_sentence)
+
+            self.history.append({"role": "user", "content": user_message})
+            self.history.append({"role": "assistant", "content": reply})
+
+            if intent == "escalate_urgent":
+                await self._wait_for_playback_ack()
+                self._save_turn_async(user_message, reply)
+                await self._end_call()
+            elif intent == "escalate_human":
+                await self._wait_for_playback_ack()
+                self._save_turn_async(user_message, reply)
+                await self._transfer_to_human()
+            else:
+                self._save_turn_async(user_message, reply)
+        finally:
+            # Ready for the next turn's first Twilio audio frame to mark a fresh t=0.
+            self._turn_timer_start = None
+
+    def _save_turn_async(self, user_message: str, reply: str) -> None:
+        # Fire-and-forget: the caller hears the reply without waiting on two
+        # Postgres writes first. The enclosing task group still waits for
+        # these before the call is considered finished (anyio guarantees
+        # spawned tasks complete before `async with tg:` exits), so nothing
+        # is lost even if the call ends right after this.
+        if not self.call_sid:
+            return
+        self._task_group.start_soon(db.save_turn, self.call_sid, "user", user_message)
+        self._task_group.start_soon(db.save_turn, self.call_sid, "assistant", reply)
+
+    async def _speak(self, text: str, on_first_frame: Callable[[], Awaitable[None]] | None = None) -> None:
         # Streamed rather than buffered in full first: Deepgram sends audio
         # progressively, so relaying frames as they arrive gets sound to the
         # caller far sooner than waiting for the entire synthesis to finish.
         # Still paced to real time (one frame per FRAME_DURATION_S) regardless
         # of how fast Deepgram delivers — sending faster than real time is what
-        # causes choppy/broken playback on Twilio's end.
+        # causes choppy/broken playback on Twilio's end. Called once per
+        # sentence during streaming replies, so this only speaks — callers
+        # that need to know playback has actually finished (before hanging up
+        # or transferring) call _wait_for_playback_ack() afterward.
+        frame_sent = False
+
         async def _send(frame: bytes) -> None:
+            nonlocal frame_sent
             await self.websocket.send_json({
                 "event": "media",
                 "streamSid": self.stream_sid,
                 "media": {"payload": base64.b64encode(frame).decode("ascii")},
             })
+            if not frame_sent:
+                frame_sent = True
+                if on_first_frame is not None:
+                    await on_first_frame()
             await anyio.sleep(FRAME_DURATION_S)
 
         buffer = bytearray()
@@ -186,9 +255,10 @@ class CallSession:
         if buffer:
             await _send(bytes(buffer))
 
-        if not wait_for_playback:
-            return
-
+    async def _wait_for_playback_ack(self) -> None:
+        """Sends a mark and waits for Twilio's echo, confirming everything
+        spoken so far has actually finished playing. Used before ending or
+        transferring a call, so the caller isn't cut off mid-sentence."""
         self._mark_counter += 1
         mark_name = f"turn-{self._mark_counter}"
         mark_event = anyio.Event()
@@ -213,9 +283,9 @@ class CallSession:
             print(f"[call_handler] human transfer failed: {exc!r}")
             await self._speak(
                 "I'm sorry, I wasn't able to transfer you right now. "
-                "Please call us on 0161 234 5678 to speak to a receptionist.",
-                wait_for_playback=True,
+                "Please call us on 0161 234 5678 to speak to a receptionist."
             )
+            await self._wait_for_playback_ack()
         await self._close_audio_stream()
         await self.websocket.close()
 

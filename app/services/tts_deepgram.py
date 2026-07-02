@@ -1,3 +1,5 @@
+import time
+
 import httpx
 
 from app.config import settings
@@ -64,6 +66,9 @@ async def synthesize_speech_stream(
     """
     headers, params = _build_request(model, encoding, sample_rate, container)
 
+    start = time.perf_counter()
+    first_chunk = True
+
     async with httpx.AsyncClient() as client:
         async with client.stream(
             "POST",
@@ -75,4 +80,8 @@ async def synthesize_speech_stream(
         ) as response:
             response.raise_for_status()
             async for chunk in response.aiter_bytes():
+                if first_chunk:
+                    first_chunk = False
+                    elapsed = time.perf_counter() - start
+                    print(f'[EMMA-TIMING] TTS first chunk from Deepgram: {elapsed:.2f}s | text: "{text}"')
                 yield chunk

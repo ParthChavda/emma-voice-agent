@@ -85,6 +85,20 @@ def _fake_tts_stream(*chunk_lists: bytes) -> MagicMock:
     return MagicMock(side_effect=make_stream)
 
 
+def _fake_chat_stream(reply: str, intent: str | None, sentences: list[str] | None = None) -> MagicMock:
+    """Mock usable as chat_completion_stream: calls on_sentence once per
+    entry in `sentences` (or once with the full reply if not given), then
+    returns (reply, intent) — mirroring the real function's contract. Still
+    a MagicMock, so call assertions (e.g. on the messages argument) work."""
+
+    async def fake(messages, tools, on_sentence):
+        for sentence in (sentences or [reply]):
+            await on_sentence(sentence)
+        return reply, intent
+
+    return MagicMock(side_effect=fake)
+
+
 @pytest.mark.anyio
 async def test_start_event_speaks_greeting():
     ws = _FakeTwilioWebSocket([
@@ -126,8 +140,8 @@ async def test_normal_turn_speaks_reply_and_saves_history():
         patch("app.core.call_handler.transcribe_stream", _scripted_stt(["Hi, I need an appointment."])),
         patch("app.core.call_handler.retrieve", AsyncMock(return_value=[])),
         patch(
-            "app.core.call_handler.chat_completion",
-            AsyncMock(return_value=("Sure, how can I help?", None)),
+            "app.core.call_handler.chat_completion_stream",
+            _fake_chat_stream("Sure, how can I help?", None),
         ),
         patch(
             "app.core.call_handler.synthesize_speech_stream",
@@ -162,6 +176,153 @@ async def test_normal_turn_speaks_reply_and_saves_history():
 
 
 @pytest.mark.anyio
+async def test_multi_sentence_reply_speaks_each_sentence_separately():
+    ws = _FakeTwilioWebSocket([
+        {"event": "start", "start": {"callSid": "CA1e", "streamSid": "MZ1e"}},
+        _media_event(b"\x00" * 160),
+        {"event": "stop"},
+    ])
+    mock_tts = _fake_tts_stream(b"\x02" * 160, b"\x03" * 160, b"\x04" * 160)
+
+    with (
+        patch("app.core.call_handler.transcribe_stream", _scripted_stt(["Book it"])),
+        patch("app.core.call_handler.retrieve", AsyncMock(return_value=[])),
+        patch(
+            "app.core.call_handler.chat_completion_stream",
+            _fake_chat_stream(
+                "You're all set. See you Monday.",
+                None,
+                sentences=["You're all set.", "See you Monday."],
+            ),
+        ),
+        patch("app.core.call_handler.synthesize_speech_stream", mock_tts),
+        patch("app.core.call_handler.generate_call_summary", AsyncMock(return_value={"call_sid": "CA1e"})),
+        patch("app.core.call_handler.db.save_turn", AsyncMock()),
+        patch("app.core.call_handler.db.save_call_summary", AsyncMock()),
+    ):
+        session = CallSession(ws)
+        await session.run()
+
+    # one synthesize_speech_stream call for the greeting + one per sentence
+    assert mock_tts.call_count == 3
+    mock_tts.assert_any_call("You're all set.", encoding="mulaw", sample_rate=8000, container="none")
+    mock_tts.assert_any_call("See you Monday.", encoding="mulaw", sample_rate=8000, container="none")
+
+
+@pytest.mark.anyio
+async def test_short_turn_skips_rag_retrieval():
+    ws = _FakeTwilioWebSocket([
+        {"event": "start", "start": {"callSid": "CA1b", "streamSid": "MZ1b"}},
+        _media_event(b"\x00" * 160),
+        {"event": "stop"},
+    ])
+
+    with (
+        patch("app.core.call_handler.transcribe_stream", _scripted_stt(["Book it"])),  # 2 words
+        patch("app.core.call_handler.retrieve", AsyncMock(return_value=["should not be used"])) as mock_retrieve,
+        patch(
+            "app.core.call_handler.chat_completion_stream",
+            _fake_chat_stream("Sure, one moment.", None),
+        ) as mock_chat,
+        patch(
+            "app.core.call_handler.synthesize_speech_stream",
+            _fake_tts_stream(b"\x02" * 160, b"\x01" * 160),
+        ),
+        patch("app.core.call_handler.generate_call_summary", AsyncMock(return_value={"call_sid": "CA1b"})),
+        patch("app.core.call_handler.db.save_turn", AsyncMock()),
+        patch("app.core.call_handler.db.save_call_summary", AsyncMock()),
+    ):
+        session = CallSession(ws)
+        await session.run()
+
+    mock_retrieve.assert_not_called()
+    # build_messages still gets called with an empty chunks list, not the mocked chunks
+    messages_arg = mock_chat.call_args[0][0]
+    assert not any("should not be used" in m.get("content", "") for m in messages_arg)
+
+
+@pytest.mark.anyio
+async def test_longer_turn_still_calls_rag_retrieval():
+    ws = _FakeTwilioWebSocket([
+        {"event": "start", "start": {"callSid": "CA1c", "streamSid": "MZ1c"}},
+        _media_event(b"\x00" * 160),
+        {"event": "stop"},
+    ])
+
+    with (
+        patch(
+            "app.core.call_handler.transcribe_stream",
+            _scripted_stt(["What are your opening hours on a Saturday?"]),  # 8 words
+        ),
+        patch("app.core.call_handler.retrieve", AsyncMock(return_value=["hours info"])) as mock_retrieve,
+        patch(
+            "app.core.call_handler.chat_completion_stream",
+            _fake_chat_stream("We're open 9 to 12.", None),
+        ),
+        patch(
+            "app.core.call_handler.synthesize_speech_stream",
+            _fake_tts_stream(b"\x02" * 160, b"\x01" * 160),
+        ),
+        patch("app.core.call_handler.generate_call_summary", AsyncMock(return_value={"call_sid": "CA1c"})),
+        patch("app.core.call_handler.db.save_turn", AsyncMock()),
+        patch("app.core.call_handler.db.save_call_summary", AsyncMock()),
+    ):
+        session = CallSession(ws)
+        await session.run()
+
+    mock_retrieve.assert_called_once_with("What are your opening hours on a Saturday?", top_k=3)
+
+
+@pytest.mark.anyio
+async def test_db_save_turn_happens_after_speaking_not_before():
+    ws = _FakeTwilioWebSocket([
+        {"event": "start", "start": {"callSid": "CA1d", "streamSid": "MZ1d"}},
+        _media_event(b"\x00" * 160),
+        {"event": "stop"},
+    ])
+
+    order: list[str] = []
+
+    async def fake_save_turn(call_sid, role, content):
+        order.append(f"save_turn:{role}:{content}")
+
+    real_send_json = ws.send_json
+
+    async def tracking_send_json(message):
+        if message.get("event") == "media":
+            order.append("media")
+        await real_send_json(message)
+
+    ws.send_json = tracking_send_json
+
+    with (
+        patch("app.core.call_handler.transcribe_stream", _scripted_stt(["Book it"])),
+        patch("app.core.call_handler.retrieve", AsyncMock(return_value=[])),
+        patch(
+            "app.core.call_handler.chat_completion_stream",
+            _fake_chat_stream("Sure, one moment.", None),
+        ),
+        patch(
+            "app.core.call_handler.synthesize_speech_stream",
+            _fake_tts_stream(b"\x02" * 160, b"\x01" * 160),
+        ),
+        patch("app.core.call_handler.generate_call_summary", AsyncMock(return_value={"call_sid": "CA1d"})),
+        patch("app.core.call_handler.db.save_turn", fake_save_turn),
+        patch("app.core.call_handler.db.save_call_summary", AsyncMock()),
+    ):
+        session = CallSession(ws)
+        await session.run()
+
+    # the LAST "media" send (the turn's reply, not the earlier greeting) must
+    # precede the fire-and-forget save_turn calls for that same turn
+    last_media_index = max(i for i, entry in enumerate(order) if entry == "media")
+    save_user_index = order.index("save_turn:user:Book it")
+    save_assistant_index = order.index("save_turn:assistant:Sure, one moment.")
+    assert last_media_index < save_user_index
+    assert last_media_index < save_assistant_index
+
+
+@pytest.mark.anyio
 async def test_escalate_urgent_speaks_then_ends_call():
     ws = _FakeTwilioWebSocket([
         {"event": "start", "start": {"callSid": "CA2", "streamSid": "MZ2"}},
@@ -172,8 +333,8 @@ async def test_escalate_urgent_speaks_then_ends_call():
         patch("app.core.call_handler.transcribe_stream", _scripted_stt(["I have chest pain."])),
         patch("app.core.call_handler.retrieve", AsyncMock(return_value=[])),
         patch(
-            "app.core.call_handler.chat_completion",
-            AsyncMock(return_value=("This sounds like an emergency. Please call 999 now.", "escalate_urgent")),
+            "app.core.call_handler.chat_completion_stream",
+            _fake_chat_stream("This sounds like an emergency. Please call 999 now.", "escalate_urgent"),
         ),
         patch(
             "app.core.call_handler.synthesize_speech_stream",
@@ -206,8 +367,8 @@ async def test_escalate_human_redirects_call_and_closes_socket():
         patch("app.core.call_handler.transcribe_stream", _scripted_stt(["Can I speak to a person?"])),
         patch("app.core.call_handler.retrieve", AsyncMock(return_value=[])),
         patch(
-            "app.core.call_handler.chat_completion",
-            AsyncMock(return_value=("Transferring you now.", "escalate_human")),
+            "app.core.call_handler.chat_completion_stream",
+            _fake_chat_stream("Transferring you now.", "escalate_human"),
         ),
         patch(
             "app.core.call_handler.synthesize_speech_stream",
@@ -241,8 +402,8 @@ async def test_escalate_human_speaks_apology_and_still_ends_call_when_redirect_f
         patch("app.core.call_handler.transcribe_stream", _scripted_stt(["Can I speak to a person?"])),
         patch("app.core.call_handler.retrieve", AsyncMock(return_value=[])),
         patch(
-            "app.core.call_handler.chat_completion",
-            AsyncMock(return_value=("Transferring you now.", "escalate_human")),
+            "app.core.call_handler.chat_completion_stream",
+            _fake_chat_stream("Transferring you now.", "escalate_human"),
         ),
         patch(
             "app.core.call_handler.synthesize_speech_stream",
