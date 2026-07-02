@@ -15,7 +15,7 @@ PRACTICE_CHUNKS = [
 ]
 
 
-def test_booking_intent(client):
+def test_faq_uses_rag_context_for_prescription_question(client):
     with (
         patch("app.db.load_history", new_callable=AsyncMock, return_value=[]),
         patch("app.db.save_turn", new_callable=AsyncMock),
@@ -23,30 +23,12 @@ def test_booking_intent(client):
     ):
         resp = client.post(
             "/chat",
-            json={"message": "I'd like to book an appointment please", "session_id": "test-book-1"},
+            json={"message": "How do I get a repeat prescription for metformin?", "session_id": "test-rx-1"},
         )
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["intent"] == "book_appointment"
-    assert len(data["reply"]) > 10
-    assert data["session_id"] == "test-book-1"
-
-
-def test_prescription_intent(client):
-    with (
-        patch("app.db.load_history", new_callable=AsyncMock, return_value=[]),
-        patch("app.db.save_turn", new_callable=AsyncMock),
-        patch("app.routes.chat.retrieve", new_callable=AsyncMock, return_value=PRACTICE_CHUNKS),
-    ):
-        resp = client.post(
-            "/chat",
-            json={"message": "I need a repeat prescription for metformin", "session_id": "test-rx-1"},
-        )
-
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["intent"] == "repeat_prescription"
+    assert data["intent"] is None
     assert len(data["reply"]) > 10
 
 
@@ -139,11 +121,10 @@ def test_multi_turn_uses_history(client):
     ):
         resp = client.post(
             "/chat",
-            json={"message": "I need to book a routine appointment", "session_id": "test-multiturn-1"},
+            json={"message": "What's my name again?", "session_id": "test-multiturn-1"},
         )
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["intent"] == "book_appointment"
     reply_lower = data["reply"].lower()
     assert "sarah" in reply_lower

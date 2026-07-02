@@ -57,17 +57,22 @@ async def synthesize_speech_stream(
     encoding: str = "mp3",
     sample_rate: int | None = None,
     container: str | None = None,
+    label: str | None = None,
 ):
     """
     Same as synthesize_speech, but yields audio bytes as they arrive instead of
     waiting for the full response — Deepgram streams progressively, so this cuts
     time-to-first-audio substantially for latency-sensitive callers (e.g. a live
     phone call), versus buffering the entire synthesis before sending anything.
+
+    label (e.g. "turn 3") is prefixed on the [EMMA-TIMING] line so this
+    sentence's synthesis latency can be tied back to the turn it belongs to.
     """
     headers, params = _build_request(model, encoding, sample_rate, container)
 
     start = time.perf_counter()
     first_chunk = True
+    tag = f"[{label}] " if label else ""
 
     async with httpx.AsyncClient() as client:
         async with client.stream(
@@ -83,5 +88,5 @@ async def synthesize_speech_stream(
                 if first_chunk:
                     first_chunk = False
                     elapsed = time.perf_counter() - start
-                    print(f'[EMMA-TIMING] TTS first chunk from Deepgram: {elapsed:.2f}s | text: "{text}"')
+                    print(f'[EMMA-TIMING] {tag}TTS first chunk from Deepgram: {elapsed:.2f}s | text: "{text}"')
                 yield chunk

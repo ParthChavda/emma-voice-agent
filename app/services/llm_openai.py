@@ -2,12 +2,10 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable
-from datetime import datetime
 
 from openai import AsyncOpenAI
 
 from app.config import settings
-from app.services import appointments, patients, prescriptions
 
 _client: AsyncOpenAI | None = None
 
@@ -17,51 +15,6 @@ URGENT_REPLY = (
 )
 
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "book_appointment",
-            "description": "Book or request an appointment for the patient.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "patient_name": {"type": "string"},
-                    "patient_dob": {
-                        "type": "string",
-                        "description": "Patient's date of birth, format YYYY-MM-DD",
-                    },
-                    "appointment_type": {
-                        "type": "string",
-                        "enum": ["routine", "urgent", "telephone", "nurse"],
-                    },
-                    "preferred_date": {
-                        "type": "string",
-                        "description": "Free-text date/time preference",
-                    },
-                },
-                "required": ["patient_name", "patient_dob", "appointment_type"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "repeat_prescription",
-            "description": "Request a repeat prescription for the patient.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "patient_name": {"type": "string"},
-                    "patient_dob": {
-                        "type": "string",
-                        "description": "Patient's date of birth, format YYYY-MM-DD",
-                    },
-                    "medication_name": {"type": "string"},
-                },
-                "required": ["patient_name", "patient_dob", "medication_name"],
-            },
-        },
-    },
     {
         "type": "function",
         "function": {
@@ -144,46 +97,7 @@ MOCK_RESPONSES: dict = {
 }
 
 
-def _format_slot_time(iso_str: str) -> str:
-    """Render an ISO timestamp as unambiguous natural language for the model to quote verbatim."""
-    return datetime.fromisoformat(iso_str).strftime("%A %d %B %Y at %H:%M")
-
-
-async def _handle_book_appointment(args: dict) -> dict:
-    patient = await patients.find_patient(args["patient_name"], args["patient_dob"])
-    if patient is None:
-        return {"error": "patient_not_found"}
-    slots = await appointments.list_available_slots(args["appointment_type"])
-    if not slots:
-        return {"error": "no_slots_available"}
-    booking = await appointments.create_booking(patient["id"], slots[0]["id"])
-    return {
-        # The verified record's name, not necessarily what the caller's
-        # speech transcribed to — so Emma confirms the correct name back.
-        "patient_name": patient["full_name"],
-        "slot": _format_slot_time(booking["start_time"]),
-        "doctor": booking["doctor_name"],
-        "ref": booking["ref"],
-    }
-
-
-async def _handle_repeat_prescription(args: dict) -> dict:
-    patient = await patients.find_patient(args["patient_name"], args["patient_dob"])
-    if patient is None:
-        return {"error": "patient_not_found"}
-    result = await prescriptions.request_repeat(patient["id"], args["medication_name"])
-    return {
-        "patient_name": patient["full_name"],
-        "status": "requested",
-        "ready_in": "48 hours",
-        "ref": result["ref"],
-    }
-
-
-ASYNC_HANDLERS = {
-    "book_appointment": _handle_book_appointment,
-    "repeat_prescription": _handle_repeat_prescription,
-}
+ASYNC_HANDLERS: dict = {}
 
 
 def get_client() -> AsyncOpenAI:
@@ -200,17 +114,21 @@ async def chat_completion(
     # Bypass the model entirely for known emergency phrasing — relying on the
     # model to reliably emit a tool call for this exact wording isn't safe enough.
     if _mentions_urgent_symptom(messages):
+        print(f'[EMMA-TIMING] Emma reply (keyword short-circuit) | intent: escalate_urgent | text: "{URGENT_REPLY}"')
         return URGENT_REPLY, "escalate_urgent"
 
+    llm_start = time.perf_counter()
     response = await get_client().chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
         tools=tools,
         tool_choice="auto",
     )
+    print(f"[EMMA-TIMING] LLM first completion: {time.perf_counter() - llm_start:.2f}s")
     choice = response.choices[0]
 
     if choice.finish_reason != "tool_calls" or not choice.message.tool_calls:
+        print(f'[EMMA-TIMING] Emma reply (no tool call) | text: "{choice.message.content}"')
         return choice.message.content, None
 
     tool_call = choice.message.tool_calls[0]
@@ -218,14 +136,19 @@ async def chat_completion(
     fn_args = json.loads(tool_call.function.arguments)
 
     if fn_name == "escalate_urgent":
+        print(f'[EMMA-TIMING] Emma reply | intent: {fn_name} | text: "{URGENT_REPLY}"')
         return URGENT_REPLY, fn_name
 
+    tool_start = time.perf_counter()
     if fn_name in ASYNC_HANDLERS:
         mock_result = await ASYNC_HANDLERS[fn_name](fn_args)
     elif fn_name in MOCK_RESPONSES:
         mock_result = MOCK_RESPONSES[fn_name](fn_args)
     else:
-        return f"I'm sorry, I wasn't able to complete that request. Please call us on 0161 234 5678.", fn_name
+        reply = "I'm sorry, I wasn't able to complete that request. Please call us on 0161 234 5678."
+        print(f'[EMMA-TIMING] Emma reply | intent: {fn_name} (unhandled) | text: "{reply}"')
+        return reply, fn_name
+    print(f"[EMMA-TIMING] tool '{fn_name}': {time.perf_counter() - tool_start:.2f}s")
 
     messages = messages + [
         {
@@ -248,13 +171,17 @@ async def chat_completion(
             "content": json.dumps(mock_result),
         },
     ]
+    second_start = time.perf_counter()
     response2 = await get_client().chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
         tools=tools,
         tool_choice="none",
     )
-    return response2.choices[0].message.content, fn_name
+    print(f"[EMMA-TIMING] LLM second completion: {time.perf_counter() - second_start:.2f}s")
+    reply = response2.choices[0].message.content
+    print(f'[EMMA-TIMING] Emma reply | intent: {fn_name} | text: "{reply}"')
+    return reply, fn_name
 
 
 # Requires whitespace already present after the punctuation — deliberately
@@ -352,15 +279,23 @@ async def chat_completion_stream(
     messages: list[dict],
     tools: list[dict],
     on_sentence: Callable[[str], Awaitable[None]],
+    turn_label: str | None = None,
 ) -> tuple[str, str | None]:
     """Like chat_completion(), but calls on_sentence(text) for each complete
     sentence of the reply as soon as it's available, instead of only
     returning the full reply once generation has finished. Lets the caller
     (the live call handler) start speaking a reply before the model has
     finished composing the rest of it.
+
+    turn_label (e.g. "turn 3") is prefixed on every [EMMA-TIMING] line so logs
+    from overlapping turns — STT keeps listening while a previous turn's
+    reply is still being spoken — can be told apart in the raw log stream.
     """
+    tag = f"[{turn_label}] " if turn_label else ""
+
     if _mentions_urgent_symptom(messages):
         await on_sentence(URGENT_REPLY)
+        print(f'[EMMA-TIMING] {tag}Emma reply (keyword short-circuit) | intent: escalate_urgent | text: "{URGENT_REPLY}"')
         return URGENT_REPLY, "escalate_urgent"
 
     # Marks when the (first) completion call begins; wrapping on_sentence lets
@@ -375,18 +310,24 @@ async def chat_completion_stream(
         if not first_sentence_logged:
             first_sentence_logged = True
             elapsed = time.perf_counter() - llm_start
-            print(f'[EMMA-TIMING] LLM first sentence: {elapsed:.2f}s | text: "{sentence}"')
+            # Text isn't printed here — the full reply is logged once, below,
+            # once it's known; printing per-sentence text here as well as
+            # there just repeats the same words across two log lines.
+            print(f"[EMMA-TIMING] {tag}LLM first sentence: {elapsed:.2f}s")
         await on_sentence(sentence)
 
     reply, fn_name, fn_args, tool_call_id = await _stream_first_completion(messages, tools, timed_on_sentence)
 
     if reply is not None:
+        print(f'[EMMA-TIMING] {tag}Emma reply (no tool call) | text: "{reply}"')
         return reply, None
 
     if fn_name == "escalate_urgent":
         await timed_on_sentence(URGENT_REPLY)
+        print(f'[EMMA-TIMING] {tag}Emma reply | intent: {fn_name} | text: "{URGENT_REPLY}"')
         return URGENT_REPLY, fn_name
 
+    tool_start = time.perf_counter()
     if fn_name in ASYNC_HANDLERS:
         mock_result = await ASYNC_HANDLERS[fn_name](fn_args)
     elif fn_name in MOCK_RESPONSES:
@@ -394,7 +335,9 @@ async def chat_completion_stream(
     else:
         reply = "I'm sorry, I wasn't able to complete that request. Please call us on 0161 234 5678."
         await timed_on_sentence(reply)
+        print(f'[EMMA-TIMING] {tag}Emma reply | intent: {fn_name} (unhandled) | text: "{reply}"')
         return reply, fn_name
+    print(f"[EMMA-TIMING] {tag}tool '{fn_name}': {time.perf_counter() - tool_start:.2f}s")
 
     messages = messages + [
         {
@@ -425,4 +368,5 @@ async def chat_completion_stream(
         stream=True,
     )
     full_reply = await _stream_text_by_sentence(stream2, timed_on_sentence)
+    print(f'[EMMA-TIMING] {tag}Emma reply | intent: {fn_name} | text: "{full_reply}"')
     return full_reply, fn_name

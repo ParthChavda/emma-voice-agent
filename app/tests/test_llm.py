@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.services.llm_openai import MOCK_RESPONSES, URGENT_REPLY, TOOLS
 
 
-def test_tools_list_has_five_entries():
-    assert len(TOOLS) == 5
+def test_tools_list_has_three_entries():
+    assert len(TOOLS) == 3
 
 
 def test_tools_all_have_function_type():
@@ -17,8 +17,6 @@ def test_tools_all_have_function_type():
 def test_tool_names():
     names = {t["function"]["name"] for t in TOOLS}
     assert names == {
-        "book_appointment",
-        "repeat_prescription",
         "check_test_results",
         "escalate_urgent",
         "escalate_human",
@@ -136,13 +134,11 @@ async def test_chat_completion_uses_auto_tool_choice_without_urgent_keyword():
 
 
 @pytest.mark.anyio
-async def test_chat_completion_book_appointment_makes_second_call():
+async def test_chat_completion_tool_call_makes_second_call():
     tool_call = MagicMock()
     tool_call.id = "call_xyz"
-    tool_call.function.name = "book_appointment"
-    tool_call.function.arguments = json.dumps(
-        {"patient_name": "Alice", "patient_dob": "1990-05-20", "appointment_type": "routine"}
-    )
+    tool_call.function.name = "check_test_results"
+    tool_call.function.arguments = json.dumps({"patient_name": "Carol"})
 
     mock_first_choice = MagicMock()
     mock_first_choice.finish_reason = "tool_calls"
@@ -150,7 +146,7 @@ async def test_chat_completion_book_appointment_makes_second_call():
 
     mock_second_choice = MagicMock()
     mock_second_choice.finish_reason = "stop"
-    mock_second_choice.message.content = "I've booked you in for Tuesday 15 Jul at 10:30."
+    mock_second_choice.message.content = "Your results are ready, please call after 2pm."
     mock_second_choice.message.tool_calls = None
 
     mock_client = AsyncMock()
@@ -159,138 +155,15 @@ async def test_chat_completion_book_appointment_makes_second_call():
         MagicMock(choices=[mock_second_choice]),
     ]
 
-    with (
-        patch("app.services.llm_openai._client", mock_client),
-        patch(
-            "app.services.patients.find_patient",
-            AsyncMock(return_value={"id": 1, "full_name": "Alice Smith"}),
-        ),
-        patch(
-            "app.services.appointments.list_available_slots",
-            AsyncMock(return_value=[
-                {"id": 5, "doctor_name": "Dr. Ahmed", "start_time": "2026-07-14T10:30:00"}
-            ]),
-        ),
-        patch(
-            "app.services.appointments.create_booking",
-            AsyncMock(return_value={
-                "appointment_id": 42,
-                "ref": "APT-ABC123",
-                "doctor_name": "Dr. Ahmed",
-                "start_time": "2026-07-14T10:30:00",
-            }),
-        ),
-    ):
+    with patch("app.services.llm_openai._client", mock_client):
         from app.services.llm_openai import chat_completion
         reply, intent = await chat_completion(
-            [{"role": "user", "content": "book appointment"}], TOOLS
+            [{"role": "user", "content": "are my test results ready?"}], TOOLS
         )
 
-    assert intent == "book_appointment"
-    assert "10:30" in reply
+    assert intent == "check_test_results"
+    assert "2pm" in reply
     assert mock_client.chat.completions.create.call_count == 2
-
-
-@pytest.mark.anyio
-async def test_handle_book_appointment_returns_error_when_patient_not_found():
-    from app.services.llm_openai import _handle_book_appointment
-
-    with patch("app.services.patients.find_patient", AsyncMock(return_value=None)):
-        result = await _handle_book_appointment(
-            {"patient_name": "Nobody", "patient_dob": "2000-01-01", "appointment_type": "routine"}
-        )
-
-    assert result == {"error": "patient_not_found"}
-
-
-@pytest.mark.anyio
-async def test_handle_book_appointment_returns_error_when_no_slots():
-    from app.services.llm_openai import _handle_book_appointment
-
-    with (
-        patch("app.services.patients.find_patient", AsyncMock(return_value={"id": 1})),
-        patch("app.services.appointments.list_available_slots", AsyncMock(return_value=[])),
-    ):
-        result = await _handle_book_appointment(
-            {"patient_name": "Alice", "patient_dob": "1990-05-20", "appointment_type": "routine"}
-        )
-
-    assert result == {"error": "no_slots_available"}
-
-
-@pytest.mark.anyio
-async def test_handle_book_appointment_returns_booking_on_success():
-    from app.services.llm_openai import _handle_book_appointment
-
-    with (
-        patch(
-            "app.services.patients.find_patient",
-            AsyncMock(return_value={"id": 1, "full_name": "Alice Smith"}),
-        ),
-        patch(
-            "app.services.appointments.list_available_slots",
-            AsyncMock(return_value=[
-                {"id": 5, "doctor_name": "Dr. Ahmed", "start_time": "2026-07-06T09:00:00"}
-            ]),
-        ),
-        patch(
-            "app.services.appointments.create_booking",
-            AsyncMock(return_value={
-                "appointment_id": 42,
-                "ref": "APT-ABC123",
-                "doctor_name": "Dr. Ahmed",
-                "start_time": "2026-07-06T09:00:00",
-            }),
-        ),
-    ):
-        result = await _handle_book_appointment(
-            {"patient_name": "Elias", "patient_dob": "1990-05-20", "appointment_type": "routine"}
-        )
-
-    assert result == {
-        "patient_name": "Alice Smith",
-        "slot": "Monday 06 July 2026 at 09:00",
-        "doctor": "Dr. Ahmed",
-        "ref": "APT-ABC123",
-    }
-
-
-@pytest.mark.anyio
-async def test_handle_repeat_prescription_returns_error_when_patient_not_found():
-    from app.services.llm_openai import _handle_repeat_prescription
-
-    with patch("app.services.patients.find_patient", AsyncMock(return_value=None)):
-        result = await _handle_repeat_prescription(
-            {"patient_name": "Nobody", "patient_dob": "2000-01-01", "medication_name": "metformin"}
-        )
-
-    assert result == {"error": "patient_not_found"}
-
-
-@pytest.mark.anyio
-async def test_handle_repeat_prescription_returns_requested_status_on_success():
-    from app.services.llm_openai import _handle_repeat_prescription
-
-    with (
-        patch(
-            "app.services.patients.find_patient",
-            AsyncMock(return_value={"id": 1, "full_name": "Bob Jones"}),
-        ),
-        patch(
-            "app.services.prescriptions.request_repeat",
-            AsyncMock(return_value={"ref": "RX-XYZ999"}),
-        ),
-    ):
-        result = await _handle_repeat_prescription(
-            {"patient_name": "Bob", "patient_dob": "1985-02-14", "medication_name": "metformin"}
-        )
-
-    assert result == {
-        "patient_name": "Bob Jones",
-        "status": "requested",
-        "ready_in": "48 hours",
-        "ref": "RX-XYZ999",
-    }
 
 
 # ---- chat_completion_stream() ----
@@ -401,50 +274,26 @@ async def test_chat_completion_stream_tool_call_streams_only_second_completion()
     mock_client = AsyncMock()
     first_stream = _fake_stream([
         _FakeChunk(_FakeDelta(tool_calls=[
-            _FakeToolCallDelta(id="call_abc", name="book_appointment", arguments="")
+            _FakeToolCallDelta(id="call_abc", name="check_test_results", arguments="")
         ])),
         _FakeChunk(_FakeDelta(tool_calls=[
-            _FakeToolCallDelta(arguments='{"patient_name": "Alice", "patient_dob": "1990-05-20", ')
-        ])),
-        _FakeChunk(_FakeDelta(tool_calls=[
-            _FakeToolCallDelta(arguments='"appointment_type": "routine"}')
+            _FakeToolCallDelta(arguments='{"patient_name": "Alice"}')
         ])),
         _FakeChunk(_FakeDelta(), finish_reason="tool_calls"),
     ])
-    second_stream = _fake_stream(_text_chunks("You're all booked", " in for Monday."))
+    second_stream = _fake_stream(_text_chunks("Your results are ready", ", please call after 2pm."))
     mock_client.chat.completions.create.side_effect = [first_stream, second_stream]
     on_sentence = AsyncMock()
 
-    with (
-        patch("app.services.llm_openai._client", mock_client),
-        patch(
-            "app.services.patients.find_patient",
-            AsyncMock(return_value={"id": 1, "full_name": "Alice Smith"}),
-        ),
-        patch(
-            "app.services.appointments.list_available_slots",
-            AsyncMock(return_value=[
-                {"id": 5, "doctor_name": "Dr. Ahmed", "start_time": "2026-07-06T09:00:00"}
-            ]),
-        ),
-        patch(
-            "app.services.appointments.create_booking",
-            AsyncMock(return_value={
-                "appointment_id": 42,
-                "ref": "APT-ABC123",
-                "doctor_name": "Dr. Ahmed",
-                "start_time": "2026-07-06T09:00:00",
-            }),
-        ),
-    ):
+    with patch("app.services.llm_openai._client", mock_client):
         from app.services.llm_openai import chat_completion_stream
         reply, intent = await chat_completion_stream(
-            [{"role": "user", "content": "Book me an appointment"}], TOOLS, on_sentence
+            [{"role": "user", "content": "Are my test results ready?"}], TOOLS, on_sentence
         )
 
-    assert intent == "book_appointment"
-    assert reply == "You're all booked in for Monday."
+    assert intent == "check_test_results"
+    assert reply == "Your results are ready, please call after 2pm."
     # only the SECOND stream's sentence should have reached on_sentence —
     # the first (tool-deciding) stream produces no user-facing text
-    on_sentence.assert_called_once_with("You're all booked in for Monday.")
+    on_sentence.assert_called_once_with("Your results are ready, please call after 2pm.")
     assert mock_client.chat.completions.create.call_count == 2

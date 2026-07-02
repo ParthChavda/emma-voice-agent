@@ -13,7 +13,6 @@ and Zoiper (a free SIP softphone) places the call over the internet.
 - Postgres and Qdrant running, with seed data loaded:
   ```bash
   source venv/bin/activate
-  python scripts/seed_data.py
   python scripts/seed_qdrant_schedules.py
   ```
 - `ngrok` installed (`brew install ngrok` on macOS) and authenticated

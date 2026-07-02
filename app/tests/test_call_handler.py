@@ -91,7 +91,7 @@ def _fake_chat_stream(reply: str, intent: str | None, sentences: list[str] | Non
     returns (reply, intent) — mirroring the real function's contract. Still
     a MagicMock, so call assertions (e.g. on the messages argument) work."""
 
-    async def fake(messages, tools, on_sentence):
+    async def fake(messages, tools, on_sentence, turn_label=None):
         for sentence in (sentences or [reply]):
             await on_sentence(sentence)
         return reply, intent
@@ -122,7 +122,9 @@ async def test_start_event_speaks_greeting():
 
     from app.core.call_handler import GREETING
 
-    mock_tts.assert_called_once_with(GREETING, encoding="mulaw", sample_rate=8000, container="none")
+    mock_tts.assert_called_once_with(
+        GREETING, encoding="mulaw", sample_rate=8000, container="none", label="greeting"
+    )
     media_sent = [m for m in ws.sent if m["event"] == "media"]
     assert len(media_sent) == 1
     mock_save_turn.assert_called_once_with("CA0", "assistant", GREETING)
@@ -205,8 +207,12 @@ async def test_multi_sentence_reply_speaks_each_sentence_separately():
 
     # one synthesize_speech_stream call for the greeting + one per sentence
     assert mock_tts.call_count == 3
-    mock_tts.assert_any_call("You're all set.", encoding="mulaw", sample_rate=8000, container="none")
-    mock_tts.assert_any_call("See you Monday.", encoding="mulaw", sample_rate=8000, container="none")
+    mock_tts.assert_any_call(
+        "You're all set.", encoding="mulaw", sample_rate=8000, container="none", label="turn 1"
+    )
+    mock_tts.assert_any_call(
+        "See you Monday.", encoding="mulaw", sample_rate=8000, container="none", label="turn 1"
+    )
 
 
 @pytest.mark.anyio

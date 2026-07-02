@@ -61,6 +61,7 @@ class CallSession:
         self._audio_closed = False
         self._audio_send, self._audio_receive = anyio.create_memory_object_stream(max_buffer_size=math.inf)
         self._turn_lock = anyio.Lock()
+        self._turn_counter = 0
         self._task_group: anyio.abc.TaskGroup | None = None
         # Reset to None at the end of each turn (see _process_turn's finally);
         # set on the next Twilio audio frame that arrives, marking t=0 for
@@ -132,7 +133,7 @@ class CallSession:
             self.history.append({"role": "assistant", "content": GREETING})
             if self.call_sid:
                 await db.save_turn(self.call_sid, "assistant", GREETING)
-            await self._speak(GREETING)
+            await self._speak(GREETING, label="greeting")
 
     async def _on_final(self, text: str) -> None:
         self.turn_parts.append(text)
@@ -142,22 +143,29 @@ class CallSession:
             return
         user_message = " ".join(self.turn_parts)
         self.turn_parts = []
+        self._turn_counter += 1
+        turn_num = self._turn_counter
         if self._turn_timer_start is not None:
             elapsed = time.perf_counter() - self._turn_timer_start
-            print(f'[EMMA-TIMING] STT final transcript: {elapsed:.2f}s | text: "{user_message}"')
+            print(f'[EMMA-TIMING] [turn {turn_num}] STT final transcript: {elapsed:.2f}s | text: "{user_message}"')
         # Spawn rather than await: the STT receive loop must keep pulling
         # audio into Deepgram while this turn is processed, or Deepgram closes
         # the connection for inactivity if a turn takes more than a few seconds.
-        self._task_group.start_soon(self._process_turn_locked, user_message)
+        # Note STT keeps listening the whole time, so the NEXT turn's lines can
+        # start appearing in the log before this turn's finish — turn_num
+        # tags every line below so overlapping turns can still be told apart.
+        self._task_group.start_soon(self._process_turn_locked, user_message, turn_num)
 
-    async def _process_turn_locked(self, user_message: str) -> None:
+    async def _process_turn_locked(self, user_message: str, turn_num: int) -> None:
         async with self._turn_lock:
-            await self._process_turn(user_message)
+            await self._process_turn(user_message, turn_num)
 
-    async def _process_turn(self, user_message: str) -> None:
+    async def _process_turn(self, user_message: str, turn_num: int) -> None:
         # Falls back to now() if somehow unset (e.g. tests that skip the
         # media-event path) so the TOTAL log below never explodes/goes negative.
         turn_start = self._turn_timer_start or time.perf_counter()
+        label = f"turn {turn_num}"
+        tag = f"[{label}] "
         try:
             # Short turns ("yes", "book it", "cancel") are confirmations/commands,
             # not questions RAG context would help answer — skip the Qdrant round
@@ -167,7 +175,7 @@ class CallSession:
             else:
                 rag_start = time.perf_counter()
                 chunks = await retrieve(user_message, top_k=3)
-                print(f"[EMMA-TIMING] RAG retrieve: {time.perf_counter() - rag_start:.2f}s")
+                print(f"[EMMA-TIMING] {tag}RAG retrieve: {time.perf_counter() - rag_start:.2f}s")
             messages = build_messages(chunks, self.history, user_message)
 
             # Speaks each sentence as soon as it's generated rather than waiting
@@ -182,14 +190,14 @@ class CallSession:
                     tts_start = time.perf_counter()
 
                     async def _on_first_frame() -> None:
-                        print(f"[EMMA-TIMING] TTS first audio sent: {time.perf_counter() - tts_start:.2f}s")
-                        print(f"[EMMA-TIMING] TOTAL turn latency: {time.perf_counter() - turn_start:.2f}s")
+                        print(f"[EMMA-TIMING] {tag}TTS first audio sent: {time.perf_counter() - tts_start:.2f}s")
+                        print(f"[EMMA-TIMING] {tag}TIME TO FIRST AUDIO (mic -> speaker): {time.perf_counter() - turn_start:.2f}s")
 
-                    await self._speak(sentence, on_first_frame=_on_first_frame)
+                    await self._speak(sentence, on_first_frame=_on_first_frame, label=label)
                 else:
-                    await self._speak(sentence)
+                    await self._speak(sentence, label=label)
 
-            reply, intent = await chat_completion_stream(messages, TOOLS, on_sentence)
+            reply, intent = await chat_completion_stream(messages, TOOLS, on_sentence, turn_label=label)
 
             self.history.append({"role": "user", "content": user_message})
             self.history.append({"role": "assistant", "content": reply})
@@ -204,6 +212,8 @@ class CallSession:
                 await self._transfer_to_human()
             else:
                 self._save_turn_async(user_message, reply)
+
+            print(f"[EMMA-TIMING] {tag}TURN FULLY PROCESSED (mic -> reply generated): {time.perf_counter() - turn_start:.2f}s")
         finally:
             # Ready for the next turn's first Twilio audio frame to mark a fresh t=0.
             self._turn_timer_start = None
@@ -219,7 +229,12 @@ class CallSession:
         self._task_group.start_soon(db.save_turn, self.call_sid, "user", user_message)
         self._task_group.start_soon(db.save_turn, self.call_sid, "assistant", reply)
 
-    async def _speak(self, text: str, on_first_frame: Callable[[], Awaitable[None]] | None = None) -> None:
+    async def _speak(
+        self,
+        text: str,
+        on_first_frame: Callable[[], Awaitable[None]] | None = None,
+        label: str | None = None,
+    ) -> None:
         # Streamed rather than buffered in full first: Deepgram sends audio
         # progressively, so relaying frames as they arrive gets sound to the
         # caller far sooner than waiting for the entire synthesis to finish.
@@ -245,7 +260,9 @@ class CallSession:
             await anyio.sleep(FRAME_DURATION_S)
 
         buffer = bytearray()
-        async for chunk in synthesize_speech_stream(text, encoding="mulaw", sample_rate=8000, container="none"):
+        async for chunk in synthesize_speech_stream(
+            text, encoding="mulaw", sample_rate=8000, container="none", label=label
+        ):
             buffer.extend(chunk)
             while len(buffer) >= FRAME_BYTES:
                 frame = bytes(buffer[:FRAME_BYTES])
