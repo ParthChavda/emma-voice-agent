@@ -6,7 +6,9 @@ class Settings(BaseSettings):
 
     openai_api_key: str = ""
     deepgram_api_key: str = ""
+    twilio_account_sid: str = ""
     twilio_auth_token: str = ""
+    human_handoff_number: str = ""
 
     # Qdrant (cloud or local)
     qdrant_url: str = "http://localhost:6333"

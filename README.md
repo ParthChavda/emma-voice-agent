@@ -41,3 +41,6 @@ pytest
 | `app/data/knowledge_base/` | surgery info docs (txt/md) |
 | `app/tests/eval_cases.py` | adversarial/eval transcripts (Phase 5) |
 | `docker-compose.yml` | optional containerized run (Phase 5) |
+
+
+TWILIO_NUMBER=+1 659 266 3512

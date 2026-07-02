@@ -73,6 +73,39 @@ async def test_save_turn_inserts_row():
     assert content == "I need an appointment"
 
 
+@pytest.mark.anyio
+async def test_save_call_summary_inserts_row():
+    mock_conn = AsyncMock()
+
+    mock_pool = MagicMock()
+    mock_pool.acquire.return_value = _FakeAcquire(mock_conn)
+
+    summary = {
+        "call_sid": "CA123",
+        "patient_name": "Alice Smith",
+        "intent": "book_appointment",
+        "key_details": "Booked routine appointment for Monday morning",
+        "escalation_flag": False,
+        "next_action": "none",
+        "call_duration": 42.5,
+    }
+
+    with patch("app.db._pool", mock_pool):
+        from app.db import save_call_summary
+        await save_call_summary(summary)
+
+    mock_conn.execute.assert_called_once()
+    sql, call_sid, patient_name, intent, key_details, escalation_flag, next_action, call_duration = (
+        mock_conn.execute.call_args[0]
+    )
+    assert "INSERT INTO call_summaries" in sql
+    assert call_sid == "CA123"
+    assert patient_name == "Alice Smith"
+    assert intent == "book_appointment"
+    assert escalation_flag is False
+    assert call_duration == 42.5
+
+
 def test_get_pool_raises_when_not_initialised():
     with patch("app.db._pool", None):
         from app.db import get_pool

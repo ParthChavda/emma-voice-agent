@@ -69,10 +69,12 @@ async def test_chat_completion_no_tool_call_returns_content():
 
 @pytest.mark.anyio
 async def test_chat_completion_escalate_urgent_returns_hardcoded_reply():
+    # Wording chosen to NOT match URGENT_KEYWORDS, so this exercises the
+    # model-driven tool-call path rather than the keyword short-circuit.
     tool_call = MagicMock()
     tool_call.id = "call_abc"
     tool_call.function.name = "escalate_urgent"
-    tool_call.function.arguments = json.dumps({"reason": "chest pain"})
+    tool_call.function.arguments = json.dumps({"reason": "possible stroke"})
 
     mock_choice = MagicMock()
     mock_choice.finish_reason = "tool_calls"
@@ -87,12 +89,50 @@ async def test_chat_completion_escalate_urgent_returns_hardcoded_reply():
     with patch("app.services.llm_openai._client", mock_client):
         from app.services.llm_openai import chat_completion
         reply, intent = await chat_completion(
-            [{"role": "user", "content": "chest pain"}], TOOLS
+            [{"role": "user", "content": "I think I'm having a stroke"}], TOOLS
         )
 
     assert intent == "escalate_urgent"
     assert "999" in reply
     mock_client.chat.completions.create.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_chat_completion_short_circuits_on_keyword_match_without_calling_api():
+    mock_client = AsyncMock()
+
+    with patch("app.services.llm_openai._client", mock_client):
+        from app.services.llm_openai import chat_completion, URGENT_REPLY
+        reply, intent = await chat_completion(
+            [{"role": "user", "content": "I have really bad chest pain"}], TOOLS
+        )
+
+    assert reply == URGENT_REPLY
+    assert intent == "escalate_urgent"
+    mock_client.chat.completions.create.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_chat_completion_uses_auto_tool_choice_without_urgent_keyword():
+    mock_choice = MagicMock()
+    mock_choice.finish_reason = "stop"
+    mock_choice.message.content = "Sure, I can help with that."
+    mock_choice.message.tool_calls = None
+
+    mock_resp = MagicMock()
+    mock_resp.choices = [mock_choice]
+
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.return_value = mock_resp
+
+    with patch("app.services.llm_openai._client", mock_client):
+        from app.services.llm_openai import chat_completion
+        await chat_completion(
+            [{"role": "user", "content": "What time do you open?"}], TOOLS
+        )
+
+    _, kwargs = mock_client.chat.completions.create.call_args
+    assert kwargs["tool_choice"] == "auto"
 
 
 @pytest.mark.anyio

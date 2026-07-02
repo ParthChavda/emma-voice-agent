@@ -68,6 +68,19 @@ async def init_pool(dsn: str) -> None:
                 created_at      TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS call_summaries (
+                id              SERIAL PRIMARY KEY,
+                call_sid        TEXT NOT NULL,
+                patient_name    TEXT,
+                intent          TEXT,
+                key_details     TEXT,
+                escalation_flag BOOLEAN NOT NULL DEFAULT FALSE,
+                next_action     TEXT,
+                call_duration   DOUBLE PRECISION,
+                created_at      TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
 
 
 async def close_pool() -> None:
@@ -104,4 +117,21 @@ async def save_turn(session_id: str, role: str, content: str) -> None:
             session_id,
             role,
             content,
+        )
+
+
+async def save_call_summary(summary: dict) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO call_summaries "
+            "(call_sid, patient_name, intent, key_details, escalation_flag, next_action, call_duration) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            summary["call_sid"],
+            summary["patient_name"],
+            summary["intent"],
+            summary["key_details"],
+            summary["escalation_flag"],
+            summary["next_action"],
+            summary["call_duration"],
         )

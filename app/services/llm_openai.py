@@ -102,6 +102,35 @@ TOOLS = [
     },
 ]
 
+URGENT_KEYWORDS = [
+    "chest pain",
+    "can't breathe",
+    "cannot breathe",
+    "difficulty breathing",
+    "trouble breathing",
+    "struggling to breathe",
+    "severe bleeding",
+    "bleeding heavily",
+    "unconscious",
+    "loss of consciousness",
+    "passed out",
+    "collapsed",
+    "suicidal",
+    "kill myself",
+    "want to die",
+    "end my life",
+]
+
+
+def _mentions_urgent_symptom(messages: list[dict]) -> bool:
+    """Match the same hard-safety symptom list as EMMA_SYSTEM_PROMPT, so escalate_urgent
+    is forced via tool_choice rather than left to the model's discretion."""
+    if not messages or messages[-1].get("role") != "user":
+        return False
+    text = (messages[-1].get("content") or "").lower()
+    return any(keyword in text for keyword in URGENT_KEYWORDS)
+
+
 MOCK_RESPONSES: dict = {
     "check_test_results": lambda _: {
         "status": "available",
@@ -157,6 +186,11 @@ async def chat_completion(
     messages: list[dict],
     tools: list[dict],
 ) -> tuple[str, str | None]:
+    # Bypass the model entirely for known emergency phrasing — relying on the
+    # model to reliably emit a tool call for this exact wording isn't safe enough.
+    if _mentions_urgent_symptom(messages):
+        return URGENT_REPLY, "escalate_urgent"
+
     response = await get_client().chat.completions.create(
         model="gpt-4o-mini",
         messages=messages,
