@@ -96,6 +96,18 @@ MOCK_RESPONSES: dict = {
     "escalate_human": lambda _: {"action": "transfer", "queue_position": 2},
 }
 
+# Tools whose result is already final, canned text — for these, a second
+# completion would only spend ~1-2s re-phrasing a string we already have, so
+# the reply is built directly instead of round-tripping through the model
+# again. Any tool NOT listed here (e.g. a future one backed by real, variable
+# data) still goes through the normal second-completion synthesis path below.
+MOCK_REPLY_TEMPLATES: dict = {
+    "check_test_results": lambda fn_args, mock_result: mock_result["message"],
+    "escalate_human": lambda fn_args, mock_result: (
+        "I'll transfer you to a human receptionist now — please hold for a moment."
+    ),
+}
+
 
 ASYNC_HANDLERS: dict = {}
 
@@ -149,6 +161,11 @@ async def chat_completion(
         print(f'[EMMA-TIMING] Emma reply | intent: {fn_name} (unhandled) | text: "{reply}"')
         return reply, fn_name
     print(f"[EMMA-TIMING] tool '{fn_name}': {time.perf_counter() - tool_start:.2f}s")
+
+    if fn_name in MOCK_REPLY_TEMPLATES:
+        reply = MOCK_REPLY_TEMPLATES[fn_name](fn_args, mock_result)
+        print(f'[EMMA-TIMING] Emma reply (templated, no second completion) | intent: {fn_name} | text: "{reply}"')
+        return reply, fn_name
 
     messages = messages + [
         {
@@ -338,6 +355,12 @@ async def chat_completion_stream(
         print(f'[EMMA-TIMING] {tag}Emma reply | intent: {fn_name} (unhandled) | text: "{reply}"')
         return reply, fn_name
     print(f"[EMMA-TIMING] {tag}tool '{fn_name}': {time.perf_counter() - tool_start:.2f}s")
+
+    if fn_name in MOCK_REPLY_TEMPLATES:
+        reply = MOCK_REPLY_TEMPLATES[fn_name](fn_args, mock_result)
+        await timed_on_sentence(reply)
+        print(f'[EMMA-TIMING] {tag}Emma reply (templated, no second completion) | intent: {fn_name} | text: "{reply}"')
+        return reply, fn_name
 
     messages = messages + [
         {

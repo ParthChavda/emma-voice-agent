@@ -134,26 +134,20 @@ async def test_chat_completion_uses_auto_tool_choice_without_urgent_keyword():
 
 
 @pytest.mark.anyio
-async def test_chat_completion_tool_call_makes_second_call():
+async def test_chat_completion_check_test_results_uses_template_no_second_call():
+    # check_test_results has a MOCK_REPLY_TEMPLATES entry — its mock result is
+    # already final text, so this should skip the second completion entirely.
     tool_call = MagicMock()
     tool_call.id = "call_xyz"
     tool_call.function.name = "check_test_results"
     tool_call.function.arguments = json.dumps({"patient_name": "Carol"})
 
-    mock_first_choice = MagicMock()
-    mock_first_choice.finish_reason = "tool_calls"
-    mock_first_choice.message.tool_calls = [tool_call]
-
-    mock_second_choice = MagicMock()
-    mock_second_choice.finish_reason = "stop"
-    mock_second_choice.message.content = "Your results are ready, please call after 2pm."
-    mock_second_choice.message.tool_calls = None
+    mock_choice = MagicMock()
+    mock_choice.finish_reason = "tool_calls"
+    mock_choice.message.tool_calls = [tool_call]
 
     mock_client = AsyncMock()
-    mock_client.chat.completions.create.side_effect = [
-        MagicMock(choices=[mock_first_choice]),
-        MagicMock(choices=[mock_second_choice]),
-    ]
+    mock_client.chat.completions.create.return_value = MagicMock(choices=[mock_choice])
 
     with patch("app.services.llm_openai._client", mock_client):
         from app.services.llm_openai import chat_completion
@@ -162,7 +156,48 @@ async def test_chat_completion_tool_call_makes_second_call():
         )
 
     assert intent == "check_test_results"
-    assert "2pm" in reply
+    assert reply == "Results are ready. Please call after 2pm."
+    mock_client.chat.completions.create.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_chat_completion_second_call_still_happens_for_non_templated_tool():
+    # A tool with no MOCK_REPLY_TEMPLATES entry (e.g. a future one backed by
+    # real, variable data) should still go through the second completion to
+    # synthesize its reply — templating opted OUT specific tools, it didn't
+    # remove the mechanism.
+    tool_call = MagicMock()
+    tool_call.id = "call_xyz"
+    tool_call.function.name = "some_future_tool"
+    tool_call.function.arguments = "{}"
+
+    mock_first_choice = MagicMock()
+    mock_first_choice.finish_reason = "tool_calls"
+    mock_first_choice.message.tool_calls = [tool_call]
+
+    mock_second_choice = MagicMock()
+    mock_second_choice.finish_reason = "stop"
+    mock_second_choice.message.content = "Here is the synthesized reply."
+    mock_second_choice.message.tool_calls = None
+
+    mock_client = AsyncMock()
+    mock_client.chat.completions.create.side_effect = [
+        MagicMock(choices=[mock_first_choice]),
+        MagicMock(choices=[mock_second_choice]),
+    ]
+    fake_handler = AsyncMock(return_value={"some": "dynamic data"})
+
+    with (
+        patch("app.services.llm_openai._client", mock_client),
+        patch("app.services.llm_openai.ASYNC_HANDLERS", {"some_future_tool": fake_handler}),
+    ):
+        from app.services.llm_openai import chat_completion
+        reply, intent = await chat_completion(
+            [{"role": "user", "content": "trigger the future tool"}], TOOLS
+        )
+
+    assert intent == "some_future_tool"
+    assert reply == "Here is the synthesized reply."
     assert mock_client.chat.completions.create.call_count == 2
 
 
@@ -270,7 +305,9 @@ async def test_chat_completion_stream_plain_text_calls_on_sentence_per_sentence(
 
 
 @pytest.mark.anyio
-async def test_chat_completion_stream_tool_call_streams_only_second_completion():
+async def test_chat_completion_stream_check_test_results_uses_template_no_second_stream():
+    # check_test_results has a MOCK_REPLY_TEMPLATES entry, so this should
+    # speak the templated reply directly, without a second streamed completion.
     mock_client = AsyncMock()
     first_stream = _fake_stream([
         _FakeChunk(_FakeDelta(tool_calls=[
@@ -281,8 +318,7 @@ async def test_chat_completion_stream_tool_call_streams_only_second_completion()
         ])),
         _FakeChunk(_FakeDelta(), finish_reason="tool_calls"),
     ])
-    second_stream = _fake_stream(_text_chunks("Your results are ready", ", please call after 2pm."))
-    mock_client.chat.completions.create.side_effect = [first_stream, second_stream]
+    mock_client.chat.completions.create.return_value = first_stream
     on_sentence = AsyncMock()
 
     with patch("app.services.llm_openai._client", mock_client):
@@ -292,8 +328,38 @@ async def test_chat_completion_stream_tool_call_streams_only_second_completion()
         )
 
     assert intent == "check_test_results"
-    assert reply == "Your results are ready, please call after 2pm."
-    # only the SECOND stream's sentence should have reached on_sentence —
-    # the first (tool-deciding) stream produces no user-facing text
-    on_sentence.assert_called_once_with("Your results are ready, please call after 2pm.")
+    assert reply == "Results are ready. Please call after 2pm."
+    on_sentence.assert_called_once_with("Results are ready. Please call after 2pm.")
+    mock_client.chat.completions.create.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_chat_completion_stream_second_stream_still_happens_for_non_templated_tool():
+    mock_client = AsyncMock()
+    first_stream = _fake_stream([
+        _FakeChunk(_FakeDelta(tool_calls=[
+            _FakeToolCallDelta(id="call_abc", name="some_future_tool", arguments="")
+        ])),
+        _FakeChunk(_FakeDelta(tool_calls=[
+            _FakeToolCallDelta(arguments="{}")
+        ])),
+        _FakeChunk(_FakeDelta(), finish_reason="tool_calls"),
+    ])
+    second_stream = _fake_stream(_text_chunks("Here is the synthesized reply."))
+    mock_client.chat.completions.create.side_effect = [first_stream, second_stream]
+    on_sentence = AsyncMock()
+    fake_handler = AsyncMock(return_value={"some": "dynamic data"})
+
+    with (
+        patch("app.services.llm_openai._client", mock_client),
+        patch("app.services.llm_openai.ASYNC_HANDLERS", {"some_future_tool": fake_handler}),
+    ):
+        from app.services.llm_openai import chat_completion_stream
+        reply, intent = await chat_completion_stream(
+            [{"role": "user", "content": "trigger the future tool"}], TOOLS, on_sentence
+        )
+
+    assert intent == "some_future_tool"
+    assert reply == "Here is the synthesized reply."
+    on_sentence.assert_called_once_with("Here is the synthesized reply.")
     assert mock_client.chat.completions.create.call_count == 2

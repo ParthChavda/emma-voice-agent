@@ -100,3 +100,4 @@ INFO:     connection open
 [EMMA-TIMING] [turn 10] TURN FULLY PROCESSED (mic -> reply generated): 12.37s
 [call_handler] receive loop ended: WebSocketDisconnect(1011, 'keepalive ping timeout')
 INFO:     connection closed
+solving the latency problem you actually care about? : how canwe then ... 

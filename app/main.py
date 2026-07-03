@@ -6,6 +6,7 @@ from app import db
 from app.config import settings
 from app.routes import chat, voice
 from app.services.rag import ensure_ingested
+from app.services.tts_deepgram import close_http_client
 
 
 @asynccontextmanager
@@ -14,6 +15,7 @@ async def lifespan(app: FastAPI):
     await ensure_ingested()
     yield
     await db.close_pool()
+    await close_http_client()
 
 
 app = FastAPI(lifespan=lifespan)
