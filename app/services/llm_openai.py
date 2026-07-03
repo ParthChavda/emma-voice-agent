@@ -87,6 +87,44 @@ def _mentions_urgent_symptom(messages: list[dict]) -> bool:
     return any(keyword in text for keyword in URGENT_KEYWORDS)
 
 
+# Output-side safety net: the model can occasionally speak the correct
+# escalation wording as plain text without also emitting the matching tool
+# call (finish_reason == "stop", not "tool_calls") — this catches that
+# failure mode by checking what was actually said, complementing
+# _mentions_urgent_symptom's input-side bypass with an output-side one.
+# escalate_urgent has an exact required phrase (system prompt rule 2), so
+# that check is high-confidence. escalate_human has no mandated wording, so
+# only affirmative "I'm doing this now" phrasing is matched — deliberately
+# excluding question forms like "would you like me to transfer you?", which
+# is Emma asking permission, not a decision already made.
+_URGENT_REPLY_MARKERS = ("sounds like an emergency", "call 999 now")
+# "i'll transfer you" / "i will transfer you" / "i can transfer you",
+# allowing a short affirmative infill like "need to" or "now" between the
+# modal and "transfer you" (real model phrasing seen: "I'll need to
+# transfer you..."). "i can transfer you" is ambiguous on its own (it can be
+# a capability statement offered as a question), so it only counts when the
+# reply as a whole isn't phrased as a question — genuine offers like "Would
+# you like me to transfer you?" or "...would you like that?" are excluded
+# by the trailing "?" check below, not by the wording of this pattern.
+_AFFIRMATIVE_TRANSFER_RE = re.compile(
+    r"\bi(?:'ll| will)\b(?:\s+\w+){0,3}\s+transfer(?:ring)? you\b"
+    r"|\bi(?:'m| am)\b\s+transferring you\b"
+    r"|\bi (?:can|could) transfer you\b",
+    re.IGNORECASE,
+)
+
+
+def _infer_intent_from_reply(reply: str | None) -> str | None:
+    if not reply:
+        return None
+    low = reply.lower()
+    if any(marker in low for marker in _URGENT_REPLY_MARKERS):
+        return "escalate_urgent"
+    if _AFFIRMATIVE_TRANSFER_RE.search(low) and not low.rstrip().endswith("?"):
+        return "escalate_human"
+    return None
+
+
 MOCK_RESPONSES: dict = {
     "check_test_results": lambda _: {
         "status": "available",
@@ -140,8 +178,13 @@ async def chat_completion(
     choice = response.choices[0]
 
     if choice.finish_reason != "tool_calls" or not choice.message.tool_calls:
-        print(f'[EMMA-TIMING] Emma reply (no tool call) | text: "{choice.message.content}"')
-        return choice.message.content, None
+        reply = choice.message.content
+        inferred_intent = _infer_intent_from_reply(reply)
+        if inferred_intent:
+            print(f'[EMMA-TIMING] Emma reply (no tool call, intent inferred from wording) | intent: {inferred_intent} | text: "{reply}"')
+            return reply, inferred_intent
+        print(f'[EMMA-TIMING] Emma reply (no tool call) | text: "{reply}"')
+        return reply, None
 
     tool_call = choice.message.tool_calls[0]
     fn_name = tool_call.function.name
@@ -336,6 +379,10 @@ async def chat_completion_stream(
     reply, fn_name, fn_args, tool_call_id = await _stream_first_completion(messages, tools, timed_on_sentence)
 
     if reply is not None:
+        inferred_intent = _infer_intent_from_reply(reply)
+        if inferred_intent:
+            print(f'[EMMA-TIMING] {tag}Emma reply (no tool call, intent inferred from wording) | intent: {inferred_intent} | text: "{reply}"')
+            return reply, inferred_intent
         print(f'[EMMA-TIMING] {tag}Emma reply (no tool call) | text: "{reply}"')
         return reply, None
 
