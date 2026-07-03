@@ -18,7 +18,7 @@ At each prompt, press Enter to start recording, speak, then press Enter again
 to stop and send what you said. Type 'q' + Enter instead to hang up.
 
 Requires: the app server already running locally (`uvicorn app.main:app`),
-Postgres + Qdrant reachable, DEEPGRAM_API_KEY / OPENAI_API_KEY set in .env,
+Postgres + Qdrant reachable, ELEVENLABS_API_KEY / OPENAI_API_KEY set in .env,
 and microphone access granted to your terminal app (macOS will prompt for
 this the first time; if you don't get a prompt, check System Settings ->
 Privacy & Security -> Microphone).
@@ -82,7 +82,7 @@ async def _play_mulaw(mulaw: bytes, label: str) -> None:
 
     print(f"  Emma: playing reply ({len(mulaw)} bytes)...")
     # Non-blocking: the sender_loop task must keep streaming silence to the
-    # server while this plays, or Deepgram's connection times out.
+    # server while this plays, or the STT provider's connection times out.
     try:
         proc = await asyncio.create_subprocess_exec("afplay", str(wav_path))
         await proc.wait()
@@ -93,7 +93,7 @@ async def _play_mulaw(mulaw: bytes, label: str) -> None:
 async def _sender_loop(ws, audio_queue: "asyncio.Queue[bytes]", stop_event: asyncio.Event) -> None:
     """Stream audio to the server for the whole call: queued turn audio when
     available, silence otherwise. Never stops, matching real Twilio behavior —
-    Deepgram's connection times out if it goes quiet for too long."""
+    the STT provider's connection times out if it goes quiet for too long."""
     while not stop_event.is_set():
         try:
             frame = audio_queue.get_nowait()

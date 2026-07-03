@@ -6,7 +6,7 @@
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # fill in OPENAI_API_KEY, DEEPGRAM_API_KEY, TWILIO_AUTH_TOKEN
+cp .env.example .env  # fill in OPENAI_API_KEY, ELEVENLABS_API_KEY, TWILIO_AUTH_TOKEN
 ```
 
 ## Run
@@ -25,17 +25,12 @@ uvicorn app.main:app --reload
 | `app/config.py` | env vars / settings |
 | `app/routes/voice.py` | Twilio webhook + media stream endpoints (Phase 3) |
 | `app/routes/chat.py` | text-only test endpoint (Phase 2) |
-| `app/services/stt_deepgram.py` | Deepgram STT streaming client (Phase 3) |
-| `app/services/tts_deepgram.py` | Deepgram TTS client (Phase 3) |
+| `app/services/stt_elevenlabs.py` | ElevenLabs STT (Scribe Realtime) streaming client (Phase 3) |
+| `app/services/tts_elevenlabs.py` | ElevenLabs TTS streaming client (Phase 3) |
 | `app/services/llm_openai.py` | OpenAI chat + function calling (Phase 2) |
 | `app/services/rag.py` | embeddings + vector search (Phase 4) |
 | `app/core/prompts.py` | EMMA system prompt + safety rules (Phase 2) |
-| `app/core/state.py` | call/session state machine (Phase 3) |
+| `app/core/call_handler.py` | STT -> RAG -> LLM -> TTS turn orchestration (Phase 3) |
 | `app/core/notes.py` | post-call structured note generator (Phase 4) |
 | `app/knowledge_base/` | surgery info docs (txt/md) |
 | `docker-compose.yml` | optional containerized run (Phase 5) |
-
-
-TWILIO_NUMBER=+1 659 266 3512
-
-sk_296c126153a1bab2b5fdb09e9f8bff0e5b72e919aaaead0f

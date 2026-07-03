@@ -10,6 +10,8 @@
 
 > **Correction made during execution:** Task 1/2 below were originally written against `python-dateutil`. Verification during Task 2 caught a real bug — `dateutil.parser` doesn't understand relative phrases like "tomorrow" or "in three days" at all; it silently ignores them and defaults to the current day. Switched to `parsedatetime` (purpose-built for relative natural-language date parsing, confirmed correct for every phrasing tested). The actual shipped code in `app/services/appointments.py` uses `parsedatetime.Calendar().parseDT(text, sourceTime=now, tzinfo=timezone.utc)`, treating `status == 0` as "couldn't parse" — not the `dateutil` code shown in the task steps below.
 
+> **Superseded, 2026-07-03 (later same day):** this plan's `is_slot_taken`/`create_appointment` design (existence-check against `appointments` directly, confirm-before-booking prompt wording) was replaced per user request with a real `slots` table (half-hour increments, generated for today/tomorrow from opening hours), claimed atomically via `book_slot_and_create_appointment` inside a transaction, and the prompt's confirm-before-booking step was removed as too repetitive. See `app/services/appointments.py` and `app/core/prompts.py` rule 9 for what's actually running — the task steps below describe the original design, not the current implementation.
+
 ---
 
 ### Task 1: Add `python-dateutil` dependency and the `appointments` table

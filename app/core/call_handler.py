@@ -12,7 +12,7 @@ from app.core.notes import generate_call_summary
 from app.core.prompts import build_messages
 from app.services.llm_openai import TOOLS, chat_completion_stream
 from app.services.rag import retrieve
-from app.services.stt_deepgram import transcribe_stream
+from app.services.stt_elevenlabs import transcribe_stream
 from app.services.tts_elevenlabs import synthesize_speech_stream
 
 FRAME_BYTES = 160  # 20ms of 8kHz 8-bit mulaw, Twilio's expected media frame size
@@ -149,8 +149,9 @@ class CallSession:
             elapsed = time.perf_counter() - self._turn_timer_start
             print(f'[EMMA-TIMING] [turn {turn_num}] STT final transcript: {elapsed:.2f}s | text: "{user_message}"')
         # Spawn rather than await: the STT receive loop must keep pulling
-        # audio into Deepgram while this turn is processed, or Deepgram closes
-        # the connection for inactivity if a turn takes more than a few seconds.
+        # audio into the transcription service while this turn is processed,
+        # or the provider closes the connection for inactivity if a turn
+        # takes more than a few seconds.
         # Note STT keeps listening the whole time, so the NEXT turn's lines can
         # start appearing in the log before this turn's finish — turn_num
         # tags every line below so overlapping turns can still be told apart.
@@ -235,12 +236,12 @@ class CallSession:
         on_first_frame: Callable[[], Awaitable[None]] | None = None,
         label: str | None = None,
     ) -> None:
-        # Streamed rather than buffered in full first: Deepgram sends audio
-        # progressively, so relaying frames as they arrive gets sound to the
-        # caller far sooner than waiting for the entire synthesis to finish.
+        # Streamed rather than buffered in full first: the TTS provider sends
+        # audio progressively, so relaying frames as they arrive gets sound to
+        # the caller far sooner than waiting for the entire synthesis to finish.
         # Still paced to real time (one frame per FRAME_DURATION_S) regardless
-        # of how fast Deepgram delivers — sending faster than real time is what
-        # causes choppy/broken playback on Twilio's end. Called once per
+        # of how fast the provider delivers — sending faster than real time is
+        # what causes choppy/broken playback on Twilio's end. Called once per
         # sentence during streaming replies, so this only speaks — callers
         # that need to know playback has actually finished (before hanging up
         # or transferring) call _wait_for_playback_ack() afterward.

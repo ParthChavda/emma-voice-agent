@@ -1,5 +1,19 @@
 # Minimal real booking flow — design
 
+> **Superseded, 2026-07-03 (later same day):** the "explicitly out of scope"
+> section below ruled out a pre-seeded `slots` table and concurrency-safe
+> booking, and rule 9 originally required reading details back for
+> confirmation before booking. Both were revisited per user request: a real
+> `slots` table (half-hour increments, generated for today/tomorrow from
+> opening hours) now backs `book_appointment`, claimed atomically inside a
+> transaction to close the double-booking race this doc calls out as
+> acceptable-for-POC below, and the confirmation step was removed from the
+> prompt as too repetitive. See `app/services/appointments.py`
+> (`is_date_supported`, `ensure_slots_for_days`,
+> `book_slot_and_create_appointment`) and `app/core/prompts.py` rule 9 for
+> the current implementation — the module/function names and code samples
+> below reflect the original (superseded) design, not what's running now.
+
 ## Context
 
 Emma previously had a full booking system (`patients`/`slots`/`appointments` tables,

@@ -51,6 +51,17 @@ async def init_pool(dsn: str) -> None:
             CREATE INDEX IF NOT EXISTS appointments_time_idx
             ON appointments (appointment_time)
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS slots (
+                id          SERIAL PRIMARY KEY,
+                slot_time   TIMESTAMPTZ NOT NULL UNIQUE,
+                is_booked   BOOLEAN NOT NULL DEFAULT FALSE
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS slots_time_idx
+            ON slots (slot_time)
+        """)
 
 
 async def close_pool() -> None:
