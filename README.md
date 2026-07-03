@@ -17,12 +17,6 @@ uvicorn app.main:app --reload
 
 `GET /health` should return `{"status": "ok"}`.
 
-## Test
-
-```bash
-pytest
-```
-
 ## Structure
 
 | Path | Purpose |
@@ -38,8 +32,7 @@ pytest
 | `app/core/prompts.py` | EMMA system prompt + safety rules (Phase 2) |
 | `app/core/state.py` | call/session state machine (Phase 3) |
 | `app/core/notes.py` | post-call structured note generator (Phase 4) |
-| `app/data/knowledge_base/` | surgery info docs (txt/md) |
-| `app/tests/eval_cases.py` | adversarial/eval transcripts (Phase 5) |
+| `app/knowledge_base/` | surgery info docs (txt/md) |
 | `docker-compose.yml` | optional containerized run (Phase 5) |
 
 

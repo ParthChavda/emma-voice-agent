@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Standalone script: embed app/data/knowledge_base/doctor_schedules.md into Qdrant.
+Standalone script: embed app/knowledge_base/doctor_schedules.md into Qdrant.
 
 Usage:
     source venv/bin/activate
@@ -28,7 +28,7 @@ from qdrant_client.models import (
 from app.services.rag import COLLECTION, _embed, get_qdrant
 
 SOURCE_FILE = "doctor_schedules.md"
-DOCS_DIR = Path("app/data/knowledge_base")
+DOCS_DIR = Path("app/knowledge_base")
 
 
 async def main() -> None:

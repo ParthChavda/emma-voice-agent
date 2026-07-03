@@ -39,7 +39,7 @@ async def _embed(text: str) -> list[float]:
     return resp.data[0].embedding
 
 
-async def ingest_docs(docs_dir: str = "app/data/knowledge_base") -> None:
+async def ingest_docs(docs_dir: str = "app/knowledge_base") -> None:
     client = get_qdrant()
     existing = {c.name for c in (await client.get_collections()).collections}
     if COLLECTION not in existing:
@@ -66,7 +66,7 @@ async def ingest_docs(docs_dir: str = "app/data/knowledge_base") -> None:
         await client.upsert(collection_name=COLLECTION, points=points)
 
 
-async def ensure_ingested(docs_dir: str = "app/data/knowledge_base") -> None:
+async def ensure_ingested(docs_dir: str = "app/knowledge_base") -> None:
     client = get_qdrant()
     try:
         info = await client.get_collection(COLLECTION)
