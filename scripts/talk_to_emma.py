@@ -153,7 +153,14 @@ async def main() -> None:
     args = parser.parse_args()
 
     url = f"ws://127.0.0.1:{args.port}/voice/stream"
-    async with websockets.connect(url) as ws:
+    # ping_interval=None disables the low-level websocket keepalive ping.
+    # A real Twilio call never needs this (its own media stream keeps the
+    # connection continuously busy); here, a human pacing the conversation
+    # via "press Enter to speak" routinely takes longer than the library's
+    # 20s default ping_interval/ping_timeout, which was silently killing the
+    # connection mid-conversation (observed: CloseCode.INTERNAL_ERROR 1011,
+    # "keepalive ping timeout").
+    async with websockets.connect(url, ping_interval=None) as ws:
         await ws.send(json.dumps({
             "event": "start",
             "start": {"callSid": "CA_TALK_TO_EMMA", "streamSid": "MZ_TALK_TO_EMMA"},

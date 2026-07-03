@@ -2,10 +2,12 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.services import appointments
 
 _client: AsyncOpenAI | None = None
 
@@ -15,6 +17,34 @@ URGENT_REPLY = (
 )
 
 TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "book_appointment",
+            "description": (
+                "Book a new appointment for the patient. preferred_time accepts "
+                "any natural spoken phrasing (e.g. 'tomorrow at 3pm', 'next "
+                "Tuesday afternoon', 'the 15th at 10am') — never require the "
+                "caller to give a specific format."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patient_name": {"type": "string"},
+                    "phone_number": {"type": "string"},
+                    "service": {
+                        "type": "string",
+                        "enum": ["routine", "urgent", "telephone", "nurse"],
+                    },
+                    "preferred_time": {
+                        "type": "string",
+                        "description": "The patient's preferred appointment date/time, in whatever words they used.",
+                    },
+                },
+                "required": ["patient_name", "phone_number", "service", "preferred_time"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -147,7 +177,31 @@ MOCK_REPLY_TEMPLATES: dict = {
 }
 
 
-ASYNC_HANDLERS: dict = {}
+async def _handle_book_appointment(args: dict) -> dict:
+    now = datetime.now(timezone.utc)
+    parsed = appointments.parse_preferred_time(args["preferred_time"], now=now)
+    if parsed is None:
+        return {"status": "unclear_time"}
+    if parsed < now:
+        return {"status": "time_in_past"}
+    if not appointments.is_within_opening_hours(parsed):
+        return {"status": "outside_hours"}
+    slot = appointments.round_to_slot(parsed)
+    if await appointments.is_slot_taken(slot):
+        return {"status": "slot_taken", "requested_time": slot.isoformat()}
+    row = await appointments.create_appointment(
+        args["patient_name"], args["phone_number"], args["service"], slot
+    )
+    return {
+        "status": "booked",
+        "appointment_time": row["appointment_time"].isoformat(),
+        "ref": str(row["id"])[:8],
+    }
+
+
+ASYNC_HANDLERS: dict = {
+    "book_appointment": _handle_book_appointment,
+}
 
 
 def get_client() -> AsyncOpenAI:

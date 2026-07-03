@@ -35,6 +35,22 @@ async def init_pool(dsn: str) -> None:
                 created_at      TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS appointments (
+                id                UUID PRIMARY KEY,
+                patient_name      TEXT NOT NULL,
+                phone_number      TEXT NOT NULL,
+                service           TEXT NOT NULL,
+                appointment_time  TIMESTAMPTZ NOT NULL,
+                status            TEXT NOT NULL DEFAULT 'booked',
+                created_at        TIMESTAMPTZ DEFAULT NOW(),
+                updated_at        TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS appointments_time_idx
+            ON appointments (appointment_time)
+        """)
 
 
 async def close_pool() -> None:

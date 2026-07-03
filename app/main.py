@@ -6,7 +6,7 @@ from app import db
 from app.config import settings
 from app.routes import chat, voice
 from app.services.rag import ensure_ingested, warm_up
-from app.services.tts_deepgram import close_http_client
+from app.services.tts_elevenlabs import close_http_client
 
 
 @asynccontextmanager

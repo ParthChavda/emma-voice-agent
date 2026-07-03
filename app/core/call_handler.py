@@ -13,7 +13,7 @@ from app.core.prompts import build_messages
 from app.services.llm_openai import TOOLS, chat_completion_stream
 from app.services.rag import retrieve
 from app.services.stt_deepgram import transcribe_stream
-from app.services.tts_deepgram import synthesize_speech_stream
+from app.services.tts_elevenlabs import synthesize_speech_stream
 
 FRAME_BYTES = 160  # 20ms of 8kHz 8-bit mulaw, Twilio's expected media frame size
 FRAME_DURATION_S = 0.02

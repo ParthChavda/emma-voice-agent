@@ -4,10 +4,11 @@ Standalone script: run a fixed set of representative/adversarial conversations
 against Emma and report which ones she handles correctly.
 
 Exercises the same real pipeline as a live call — real RAG retrieval, real
-OpenAI completions, real tool dispatch — just without STT/TTS/Postgres. Each
-case has one or more automated checks (intent + substring-based); a case
-fails if any of its checks fail. No mocking, no pytest — this is a
-conversation-quality eval, not a unit test suite.
+OpenAI completions, real tool dispatch (including real Postgres writes for
+book_appointment) — just without STT/TTS. Each case has one or more automated
+checks (intent + substring-based); a case fails if any of its checks fail. No
+mocking, no pytest — this is a conversation-quality eval, not a unit test
+suite. Booking-related test rows are cleaned up after the run.
 
 Usage:
     source venv/bin/activate
@@ -21,6 +22,8 @@ from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app import db
+from app.config import settings
 from app.core.prompts import build_messages
 from app.services.llm_openai import TOOLS, chat_completion
 from app.services.rag import retrieve
@@ -56,6 +59,14 @@ def has_intent(expected: str | None) -> Check:
     return check
 
 
+def has_intent_in(*expected: str | None) -> Check:
+    def check(reply: str, intent: str | None) -> tuple[bool, str]:
+        if intent not in expected:
+            return False, f"expected intent in {list(expected)}, got {intent!r}"
+        return True, f"intent in {list(expected)}"
+    return check
+
+
 @dataclass
 class EvalCase:
     name: str
@@ -86,9 +97,42 @@ CASES: list[EvalCase] = [
         [has_intent("check_test_results"), contains("2pm")],
     ),
     EvalCase(
-        "booking_request_offers_human_immediately",
+        # Renamed/updated: Emma can now book new appointments directly
+        # (prompts.py rule 9), so a vague request should prompt her to
+        # collect the missing details herself, not defer to a human.
+        # Reschedule/cancel still defers — that's untouched by this change.
+        "booking_request_collects_details_not_human_transfer",
         ["I'd like to book an appointment for a check-up please."],
-        [has_intent("escalate_human"), not_contains("date of birth")],
+        [has_intent(None), not_contains("date of birth")],
+    ),
+    EvalCase(
+        "booking_success_with_full_details",
+        [
+            "My name is Priya Sharma, phone number 07700 900123, "
+            "I'd like a routine appointment tomorrow at 10am.",
+        ],
+        [has_intent("book_appointment"), not_contains("unable"), not_contains("cannot")],
+    ),
+    EvalCase(
+        "booking_outside_opening_hours",
+        [
+            "My name is Alex Chen, phone number 07700 900124, "
+            "I'd like a routine appointment tomorrow at 3am.",
+        ],
+        [not_contains("your appointment has been"), not_contains("successfully booked")],
+    ),
+    EvalCase(
+        "booking_unclear_time",
+        [
+            "My name is Jordan Lee, phone number 07700 900125, "
+            "I'd like a routine appointment sometime whenever works I guess.",
+        ],
+        [not_contains("your appointment has been"), not_contains("successfully booked")],
+    ),
+    EvalCase(
+        "reschedule_still_defers_to_human",
+        ["Can I reschedule my existing appointment to a different day?"],
+        [has_intent_in("escalate_human", None)],
     ),
     EvalCase(
         "emergency_keyword_shortcircuit",
@@ -146,6 +190,7 @@ async def run_case(case: EvalCase) -> tuple[bool, str, str | None, list[tuple[bo
 
 
 async def main() -> None:
+    await db.init_pool(settings.postgres_dsn)
     print(f"Running {len(CASES)} eval cases against Emma...\n")
     passed_count = 0
 
@@ -163,6 +208,18 @@ async def main() -> None:
         print()
 
     print(f"--- {passed_count}/{len(CASES)} cases passed ---")
+
+    # Booking cases write real rows — clean up so re-running this script
+    # stays idempotent (in particular so slot-availability checks aren't
+    # affected by a previous run's leftover bookings).
+    pool = db.get_pool()
+    async with pool.acquire() as conn:
+        deleted = await conn.execute(
+            "DELETE FROM appointments WHERE patient_name IN "
+            "('Priya Sharma', 'Alex Chen', 'Jordan Lee')"
+        )
+        print(f"Cleanup: {deleted}")
+    await db.close_pool()
 
 
 if __name__ == "__main__":

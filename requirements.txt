@@ -24,6 +24,7 @@ jiter==0.16.0
 numpy==2.5.0
 openai==2.44.0
 packaging==26.2
+parsedatetime==2.6
 pluggy==1.6.0
 portalocker==3.2.0
 protobuf==7.35.1
