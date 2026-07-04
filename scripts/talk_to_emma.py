@@ -30,6 +30,7 @@ import base64
 import json
 import sys
 import wave
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +43,7 @@ FRAME_BYTES = 160  # 20ms of 8kHz mulaw
 SILENCE_FRAME = b"\xff" * FRAME_BYTES
 REPLY_START_TIMEOUT_S = 20.0
 REPLY_GAP_TIMEOUT_S = 2.0
+RECORDINGS_DIR = Path("recordings")
 
 
 def _record_until_enter_sync() -> bytes:
@@ -71,14 +73,20 @@ async def _prompt(text: str) -> str:
     return await loop.run_in_executor(None, input, text)
 
 
-async def _play_mulaw(mulaw: bytes, label: str) -> None:
-    pcm = audioop.ulaw2lin(mulaw, 2)
-    wav_path = Path(f"call_reply_{label}.wav")
-    with wave.open(str(wav_path), "wb") as wf:
+def _write_wav(path: Path, pcm: bytes) -> None:
+    with wave.open(str(path), "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(pcm)
+
+
+async def _play_mulaw(mulaw: bytes, label: str, recording: bytearray | None = None) -> None:
+    pcm = audioop.ulaw2lin(mulaw, 2)
+    if recording is not None:
+        recording.extend(pcm)
+    wav_path = Path(f"call_reply_{label}.wav")
+    _write_wav(wav_path, pcm)
 
     print(f"  Emma: playing reply ({len(mulaw)} bytes)...")
     # Non-blocking: the sender_loop task must keep streaming silence to the
@@ -86,6 +94,13 @@ async def _play_mulaw(mulaw: bytes, label: str) -> None:
     try:
         proc = await asyncio.create_subprocess_exec("afplay", str(wav_path))
         await proc.wait()
+        if proc.returncode != 0:
+            # afplay can exit non-zero (e.g. output device busy/unavailable)
+            # without ever raising in Python — silently "succeeding" here
+            # while producing no audible sound at all, which is exactly the
+            # failure mode this is meant to surface instead of hiding.
+            print(f"  afplay exited with code {proc.returncode} — reply audio likely did not "
+                  f"play. Try manually: afplay {wav_path}")
     except FileNotFoundError:
         print(f"  could not auto-play — play it manually with: afplay {wav_path}")
 
@@ -114,7 +129,7 @@ async def _queue_turn_audio(audio_queue: "asyncio.Queue[bytes]", mulaw: bytes) -
         await audio_queue.put(mulaw[i:i + FRAME_BYTES])
 
 
-async def _collect_and_play_reply(ws, label: str) -> bool:
+async def _collect_and_play_reply(ws, label: str, recording: bytearray | None = None) -> bool:
     """Buffer Emma's reply audio until it goes quiet, then play it. Returns
     True if the call ended (server closed the socket — e.g. escalation/handoff)."""
     reply = bytearray()
@@ -140,7 +155,7 @@ async def _collect_and_play_reply(ws, label: str) -> bool:
                 call_ended = True
 
     if reply:
-        await _play_mulaw(bytes(reply), label)
+        await _play_mulaw(bytes(reply), label, recording=recording)
     else:
         print("  (no reply audio received)")
 
@@ -171,8 +186,15 @@ async def main() -> None:
         stop_event = asyncio.Event()
         sender_task = asyncio.create_task(_sender_loop(ws, audio_queue, stop_event))
 
+        # Both sides of the call, in speaking order — greeting, then each
+        # (caller turn, Emma reply) pair appended as they happen — so one
+        # combined .wav is saved at the end covering the whole conversation,
+        # not just Emma's side (which the pre-existing call_reply_*.wav
+        # files already captured, per-turn and separately).
+        recording = bytearray()
+
         try:
-            if await _collect_and_play_reply(ws, "greeting"):
+            if await _collect_and_play_reply(ws, "greeting", recording=recording):
                 print("Call ended before you could say anything.")
                 return
 
@@ -189,10 +211,11 @@ async def main() -> None:
                     turn -= 1
                     continue
 
+                recording.extend(pcm)
                 mulaw = audioop.lin2ulaw(pcm, 2)
                 await _queue_turn_audio(audio_queue, mulaw)
 
-                if await _collect_and_play_reply(ws, str(turn)):
+                if await _collect_and_play_reply(ws, str(turn), recording=recording):
                     print("\nCall ended by Emma (escalation or handoff).")
                     return
 
@@ -206,6 +229,11 @@ async def main() -> None:
         finally:
             stop_event.set()
             sender_task.cancel()
+            if recording:
+                RECORDINGS_DIR.mkdir(exist_ok=True)
+                out_path = RECORDINGS_DIR / f"emma_call_{datetime.now():%Y%m%d_%H%M%S}.wav"
+                _write_wav(out_path, bytes(recording))
+                print(f"\nFull conversation recording saved: {out_path}")
 
 
 if __name__ == "__main__":

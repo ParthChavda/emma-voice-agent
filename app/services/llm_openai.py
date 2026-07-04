@@ -179,29 +179,39 @@ MOCK_REPLY_TEMPLATES: dict = {
 
 async def _handle_book_appointment(args: dict) -> dict:
     now = datetime.now(timezone.utc)
-    parsed = appointments.parse_preferred_time(args["preferred_time"], now=now)
+    parsed, has_explicit_time = appointments.parse_preferred_time(args["preferred_time"], now=now)
 
     if parsed is None:
         result = {"status": "unclear_time"}
-    elif parsed < now:
+    elif has_explicit_time and parsed < now:
         result = {"status": "time_in_past"}
     elif not appointments.is_date_supported(parsed, now):
         result = {"status": "date_out_of_range"}  # only today/tomorrow have generated slots
-    elif not appointments.is_within_opening_hours(parsed):
+    elif has_explicit_time and not appointments.is_within_opening_hours(parsed):
         result = {"status": "outside_hours"}
     else:
-        slot = appointments.round_to_slot(parsed)
-        row = await appointments.book_slot_and_create_appointment(
-            args["patient_name"], args["phone_number"], args["service"], slot
+        # No real time-of-day was given ("today", "anytime", "whenever
+        # works") — find the earliest still-open slot instead of trusting
+        # parsedatetime's meaningless 09:00 default (see parse_preferred_time).
+        slot = (
+            appointments.round_to_slot(parsed)
+            if has_explicit_time
+            else await appointments.find_next_available_slot(parsed.date(), now)
         )
-        if row is None:
-            result = {"status": "slot_taken", "requested_time": slot.isoformat()}
+        if slot is None:
+            result = {"status": "no_slots_available"}
         else:
-            result = {
-                "status": "booked",
-                "appointment_time": row["appointment_time"].isoformat(),
-                "ref": str(row["id"])[:8],
-            }
+            row = await appointments.book_slot_and_create_appointment(
+                args["patient_name"], args["phone_number"], args["service"], slot
+            )
+            if row is None:
+                result = {"status": "slot_taken", "requested_time": slot.isoformat()}
+            else:
+                result = {
+                    "status": "booked",
+                    "appointment_time": row["appointment_time"].isoformat(),
+                    "ref": str(row["id"])[:8],
+                }
 
     # Logged separately from the tool-call timing line — this is the *what*
     # (which branch fired and why), not the *how long*, so it's visible

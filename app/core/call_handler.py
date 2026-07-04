@@ -24,7 +24,7 @@ MARK_TIMEOUT_S = 10
 SHORT_TURN_WORD_THRESHOLD = 6
 
 GREETING = (
-    "Hello, thank you for calling Elmwood Road Surgery. "
+    "Hello, thank you for calling QUANTUMLOOPAI. "
     "This is Emma, how can I help you today?"
 )
 

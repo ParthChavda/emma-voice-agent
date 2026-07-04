@@ -1,6 +1,6 @@
-# Elmwood Road Surgery — Practice Information
+# QUANTUMLOOPAI — Practice Information
 
-**Practice Name:** Elmwood Road Surgery
+**Practice Name:** QUANTUMLOOPAI
 **Address:** 14 Elmwood Road, Manchester, M14 6HQ
 **Phone:** 0161 234 5678
 **Email (admin only):** admin@elmwoodsurgery.nhs.uk

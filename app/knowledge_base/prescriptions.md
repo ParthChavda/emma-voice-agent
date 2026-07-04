@@ -1,4 +1,4 @@
-# Prescriptions at Elmwood Road Surgery
+# Prescriptions at QUANTUMLOOPAI
 
 ## Repeat Prescriptions
 
